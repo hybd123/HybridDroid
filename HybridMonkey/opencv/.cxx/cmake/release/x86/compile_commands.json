@@ -1,0 +1,7 @@
+[
+{
+  "directory": "/Users/xmq/GithubRepo/Fastbot_LLM_opencv/opencv/.cxx/cmake/release/x86",
+  "command": "/Users/xmq/Library/Android/sdk/ndk/25.2.9519653/toolchains/llvm/prebuilt/darwin-x86_64/bin/clang++ --target=i686-none-linux-android21 --sysroot=/Users/xmq/Library/Android/sdk/ndk/25.2.9519653/toolchains/llvm/prebuilt/darwin-x86_64/sysroot    -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -mstackrealign -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security   -O3 -DNDEBUG  -fPIC   -o CMakeFiles/opencv_jni_shared.dir/dummy.cpp.o -c /Users/xmq/GithubRepo/Fastbot_LLM_opencv/opencv/libcxx_helper/dummy.cpp",
+  "file": "/Users/xmq/GithubRepo/Fastbot_LLM_opencv/opencv/libcxx_helper/dummy.cpp"
+}
+]

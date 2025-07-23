@@ -1,0 +1,312 @@
+/*
+ * Copyright (c) 2020 Bytedance Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+/**
+ * @author Zhao Zhang, Yuhui Su
+ */
+
+apply plugin: 'com.android.library' // 应用 Android 库插件
+
+android {
+    compileSdkVersion 32
+
+    defaultConfig {
+        minSdkVersion 22
+        targetSdkVersion 32
+        versionCode 1
+        versionName "1.0"
+        testInstrumentationRunner "android.support.test.runner.AndroidJUnitRunner"
+        multiDexEnabled true
+        ndk {
+            abiFilters 'armeabi-v7a', 'arm64-v8a', 'x86', 'x86_64'
+        }
+        externalNativeBuild {
+            cmake {
+            arguments "-DANDROID_STL=c++_shared"
+        }
+    }
+
+    }
+
+    buildTypes {
+        debug{
+            debuggable true
+        }
+        release {
+            minifyEnabled false
+        }
+    }
+
+    lintOptions {
+        abortOnError false
+    }
+
+    compileOptions {
+        sourceCompatibility 1.8
+        targetCompatibility 1.8
+    }
+
+    externalNativeBuild {
+        cmake {
+            path("../native/CMakeLists.txt")
+            version = "3.18.1"
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path "src/main/cpp/CMakeLists.txt"
+            version "3.18.1"
+        }
+    }
+
+    packagingOptions {
+        jniLibs {
+            useLegacyPackaging false
+        }
+    }
+    ndkVersion '25.2.9519653'
+
+}
+
+repositories {
+    google()
+    mavenCentral()
+    maven {
+        url "https://dl.google.com/dl/android/maven2/"
+    }
+
+}
+
+dependencies {
+    // 用compileOnly 而不是 implemention的原因：
+    // 如果用后者会报错没指定用opencv的哪个变体
+    // https://github.com/dialogflow/dialogflow-android-client/issues/57
+    compileOnly(project(path: ':opencv'))
+    // 将依赖添加到 packagedDependencies 配置
+//    packagedDependencies project(path: ":opencv")
+    compileOnly files('libs/framework.jar')
+    implementation 'com.google.code.gson:gson:2.8.9'
+    implementation 'com.squareup.okhttp3:okhttp:3.12.13'
+//    implementation 'org.opencv:opencv:4.5.3'
+}
+
+gradle.projectsEvaluated {
+    tasks.withType(JavaCompile).tap {
+        configureEach {
+            Set<File> fileSet = options.bootstrapClasspath.getFiles()
+            List<File> newFileList = new ArrayList<File>()
+            newFileList.add(new File("libs/framework.jar"))
+            newFileList.addAll(fileSet)
+            options.bootstrapClasspath = files(newFileList.toArray())
+        }
+    }
+}
+
+task clearJar(type: Delete) {
+    delete 'build/libs/monkey.jar'
+}
+
+configurations {
+    // 创建可解析配置（关键修改点）
+    // 通过这个配置，可以解决implemention 中 canBeResolved 属性为false
+    // 从而导致不能打包依赖的问题，
+    // 在后面的makeAndroidJar中可以看到是从这个配置里去解析依赖的
+
+    // 创建名为 packagedDependencies 的配置
+    packagedDependencies {
+        canBeResolved = true    // 允许解析依赖
+        canBeConsumed = false   // 不作为消费配置发布
+        extendsFrom implementation // 继承 implementation
+    }
+
+
+
+}
+
+// 自定义JAR打包任务（仅处理JAR依赖）
+task makeAndroidJar(type: Jar) {
+    archiveBaseName = "monkey"
+    destinationDirectory = file("build/libs/")
+
+    // 1. 包含主模块的 Java 类
+    from(zipTree(file("build/intermediates/aar_main_jar/release/classes.jar"))) {
+        exclude 'META-INF/*.SF', 'META-INF/*.DSA'
+    }
+
+// 2. 合并 OpenCV 模块的 Java 类（AGP 4.x 正确路径）
+    def opencvClassesJar = file("${project(':opencv').buildDir}/intermediates/compile_library_classes_jar/release/classes.jar")
+    from(zipTree(opencvClassesJar)) {
+        into '/'  // 关键：将类文件合并到 JAR 根目录
+        include '**/*.class'
+//        exclude '**/BuildConfig.class'  // 排除冲突的 BuildConfig
+    }
+
+//    // 3. 嵌入 OpenCV 的本地库（.so 文件）
+//    这个是可以讲编译的so文件打包到jar里的
+//    因为不在命令行指定lib路径，依然还是会not find ，暂时没找方法解决
+//    所以为了减少jar包体积，就没打包进去了，如果以后需要打包的话可以参考这个脚本代码
+//    from(fileTree(dir: "${project(':opencv').buildDir}/intermediates/stripped_native_libs/release/out/lib", include: '**/*.so')) {
+//        into "jni/"
+//    }
+
+    // 4. 包含其他依赖库
+    from(configurations.packagedDependencies
+            .filter {
+                // 过滤掉Android系统库（group以com.android开头）
+                !it.name.startsWith('com.android') &&
+                        !it.name.startsWith('androidx')
+            }
+            .collect {
+                it.isDirectory() ? it : zipTree(it)
+            })
+
+    // 5. 处理文件冲突
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    exclude 'META-INF/*.SF', 'META-INF/*.DSA'
+}
+
+
+
+// 任务依赖设置
+afterEvaluate {
+    makeAndroidJar.dependsOn(
+            clearJar,
+            assemble
+    )
+}
+
+//
+//task makeJar(type: Jar) {
+//    def srcPath = 'build/intermediates/aar_main_jar/release/'
+//    def fileMonkey = file(srcPath+"classes.jar")
+//    from zipTree(fileMonkey)
+//    // 新增：包含所有依赖项（关键添加内容）
+//    from {
+//        configurations.runtimeClasspath  // 获取所有运行时依赖项
+//                .filter { it.name.endsWith('.jar') }  // 仅处理JAR文件
+//                .collect { zipTree(it) }     // 解压每个JAR并合并到最终JAR
+//    }
+//    // 新增：处理文件冲突
+//    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+//    exclude 'META-INF/*.SF', 'META-INF/*.DSA', 'META-INF/*.RSA' // 排除签名冲突
+//
+//    archiveBaseName = 'monkey'
+//    destinationDirectory = file("build/libs/")
+//}
+
+//makeJar.dependsOn(clearJar, assemble)
+
+
+//apply plugin: 'com.android.application'
+//
+//android {
+//    compileSdkVersion 32
+//
+//    defaultConfig {
+//        minSdkVersion 22
+//        targetSdkVersion 32
+//        versionCode 1
+//        versionName "1.0"
+//        testInstrumentationRunner "android.support.test.runner.AndroidJUnitRunner"
+//        multiDexEnabled true
+//        ndk {
+//            abiFilters 'armeabi-v7a', 'arm64-v8a', 'x86', 'x86_64'
+//        }
+////        externalNativeBuild {
+////            cmake {
+////                arguments "-DANDROID_STL=c++_shared"
+////            }
+////        }
+//
+//    }
+//
+//    buildTypes {
+//        debug{
+//            debuggable true
+//        }
+//        release {
+//            minifyEnabled false
+//        }
+//    }
+//
+//    lintOptions {
+//        abortOnError false
+//    }
+//
+//    compileOptions {
+//        sourceCompatibility 1.8
+//        targetCompatibility 1.8
+//    }
+//
+//    externalNativeBuild {
+//        cmake {
+//            path("../native/CMakeLists.txt")
+//            version = "3.18.1"
+//        }
+//    }
+//
+////    externalNativeBuild {
+////        cmake {
+////            path "src/main/cpp/CMakeLists.txt"
+////            version "3.18.1"
+////        }
+////    }
+//
+//    packagingOptions {
+//        jniLibs {
+//            useLegacyPackaging false
+//        }
+//    }
+//    ndkVersion '25.2.9519653'
+//
+//    // xmq: opencv so
+////    sourceSets{
+////        main{
+////            jniLibs.srcDirs=['src/main/libs','src/main/jni']
+////            assets.srcDirs = ['src/main/assets']
+////        }
+////    }
+//
+//}
+//
+//repositories {
+//    maven {
+//        url "https://dl.google.com/dl/android/maven2/"
+//    }
+//}
+//
+//
+//dependencies {
+////    implementation project(path: ':opencv')
+//    compileOnly files('libs/framework.jar')
+//    implementation 'com.google.code.gson:gson:2.8.9'
+//    implementation 'com.vdurmont:emoji-java:5.0.0'
+////    implementation 'org.opencv:opencv:4.9.0'
+//    implementation 'com.squareup.okhttp3:okhttp:3.12.13'
+//}
+//
+//gradle.projectsEvaluated {
+//    tasks.withType(JavaCompile).tap {
+//        configureEach {
+//            Set<File> fileSet = options.bootstrapClasspath.getFiles()
+//            List<File> newFileList = new ArrayList<File>()
+//            newFileList.add(new File("libs/framework.jar"))
+//            newFileList.addAll(fileSet)
+//            options.bootstrapClasspath = files(newFileList.toArray())
+//        }
+//    }
+//}
+

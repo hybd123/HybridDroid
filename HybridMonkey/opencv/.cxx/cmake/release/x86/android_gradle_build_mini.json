@@ -1,0 +1,33 @@
+{
+  "buildFiles": [
+    "/Users/xmq/GithubRepo/Fastbot_LLM_opencv/opencv/libcxx_helper/CMakeLists.txt"
+  ],
+  "cleanCommandsComponents": [
+    [
+      "/Users/xmq/Library/Android/sdk/cmake/3.10.2.4988404/bin/ninja",
+      "-C",
+      "/Users/xmq/GithubRepo/Fastbot_LLM_opencv/opencv/.cxx/cmake/release/x86",
+      "clean"
+    ]
+  ],
+  "buildTargetsCommandComponents": [
+    "/Users/xmq/Library/Android/sdk/cmake/3.10.2.4988404/bin/ninja",
+    "-C",
+    "/Users/xmq/GithubRepo/Fastbot_LLM_opencv/opencv/.cxx/cmake/release/x86",
+    "{LIST_OF_TARGETS_TO_BUILD}"
+  ],
+  "libraries": {
+    "opencv_jni_shared-Release-x86": {
+      "artifactName": "opencv_jni_shared",
+      "buildCommandComponents": [
+        "/Users/xmq/Library/Android/sdk/cmake/3.10.2.4988404/bin/ninja",
+        "-C",
+        "/Users/xmq/GithubRepo/Fastbot_LLM_opencv/opencv/.cxx/cmake/release/x86",
+        "opencv_jni_shared"
+      ],
+      "abi": "x86",
+      "output": "/Users/xmq/GithubRepo/Fastbot_LLM_opencv/opencv/.cxx/cmake/release/x86/libopencv_jni_shared.a",
+      "runtimeFiles": []
+    }
+  }
+}

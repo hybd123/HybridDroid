@@ -1,0 +1,7 @@
+Executable : /Users/xmq/Library/Android/sdk/cmake/3.10.2.4988404/bin/ninja
+arguments : 
+-C
+/Users/xmq/GithubRepo/Fastbot_LLM_opencv/opencv/.cxx/cmake/release/x86
+opencv_jni_shared
+jvmArgs : 
+
