@@ -3,6 +3,16 @@
 HybridDroid is a novel LLM-powered Random Testing Framwork.
 We realize this approach on top of two different AIG tools for mobile apps, Monkey, a state-of-the-practice tool and Droidbot, a state-of-the-art tool.
 
+## 📑 Table of Contents
+
+- [📈 Experimental Results](#-experimental-results)
+  - [📊 RQ1: Coverage Results](#-rq1-coverage-results)
+  - [📊 Discussion Results](#-discussion-results)
+- [📦 Installation](#-installation)
+- [⚙️ Usage](#️-usage)
+- [🔧 Configuration Options](#-configuration-options)
+- [🙌 Acknowledgements](#-acknowledgements)
+
 ## 📈 Experimental Results
 
 We evaluated our tool across 12 popular open-source Android apps using a consistent 3-hour time budget. The metrics used include **Line**, **Branch**, **Method**, and **Class** coverage.
