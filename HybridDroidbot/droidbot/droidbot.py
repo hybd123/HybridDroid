@@ -50,7 +50,6 @@ class DroidBot(object):
                  replay_output=None,
                  llm_post_escape_n=0,
                  conditional_continuation=False,
-                 conditional_threshold=8,
                  disable_llm=False):
         """
         initiate droidbot with configurations
@@ -121,7 +120,6 @@ class DroidBot(object):
                 replay_output=replay_output,
                 llm_post_escape_n=llm_post_escape_n,
                 conditional_continuation=conditional_continuation,
-                conditional_threshold=conditional_threshold,
                 disable_llm=disable_llm,
             )
         except Exception:

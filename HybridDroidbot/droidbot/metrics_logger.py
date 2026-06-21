@@ -25,23 +25,31 @@ class MetricsLogger:
     # Public hooks called from InputPolicy.start()
     # ------------------------------------------------------------------
 
-    def on_escape(self, step, current_state, tarpit_name, tarpit_entry_activity):
-        """Called the first step AFTER a tarpit escape is confirmed."""
+    def on_escape(self, step, current_state, tarpit_state_str, tarpit_structure_str, tarpit_name):
+        """Called the first step AFTER a tarpit escape is confirmed.
+
+        escape_type is determined by comparing view-tree structure hashes:
+          functional → structure_str differs from tarpit (new layout = new screen)
+          partial    → same structure_str (same layout, e.g. a dialog opened)
+
+        Using structure_str (content-free) rather than activity so that
+        single-Activity / Fragment-based apps are handled correctly.
+        """
         if self._current_escape is not None:
             self._finalize_escape()
 
-        post_activity = current_state.foreground_activity
         escape_type = (
             "functional"
-            if tarpit_entry_activity and tarpit_entry_activity != post_activity
+            if current_state.structure_str != tarpit_structure_str
             else "partial"
         )
 
         self._current_escape = {
             "step": step,
             "tarpit_name": tarpit_name,
-            "pre_escape_activity": tarpit_entry_activity,
-            "post_escape_activity": post_activity,
+            "tarpit_structure_str": tarpit_structure_str,
+            "post_escape_activity": current_state.foreground_activity,
+            "post_escape_structure_str": current_state.structure_str,
             "state_str": current_state.state_str,
             "escape_type": escape_type,
             "event_type_counts": collections.Counter(),
@@ -50,8 +58,8 @@ class MetricsLogger:
         }
         self._steps_in_window = 0
         self.logger.info(
-            f"[metrics] escape detected at step {step}: {escape_type} "
-            f"({tarpit_entry_activity} → {post_activity})"
+            f"[metrics] escape at step {step}: {escape_type} "
+            f"(structure {'changed' if escape_type == 'functional' else 'unchanged'})"
         )
 
     def on_event(self, event, current_state, step):

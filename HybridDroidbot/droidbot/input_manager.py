@@ -29,7 +29,6 @@ class InputManager(object):
                  replay_output=None,
                  llm_post_escape_n=0,
                  conditional_continuation=False,
-                 conditional_threshold=8,
                  disable_llm=False):
         """
         manage input event sent to the target device
@@ -60,7 +59,6 @@ class InputManager(object):
         # experiment parameters
         self.llm_post_escape_n = llm_post_escape_n
         self.conditional_continuation = conditional_continuation
-        self.conditional_threshold = conditional_threshold
         self.disable_llm = disable_llm
 
         # metrics logger (created after policy so output_dir is known)
@@ -91,7 +89,6 @@ class InputManager(object):
                 device, app, self.random_input,
                 llm_post_escape_n=self.llm_post_escape_n,
                 conditional_continuation=self.conditional_continuation,
-                conditional_threshold=self.conditional_threshold,
                 disable_llm=self.disable_llm,
             )
         else:
@@ -103,7 +100,6 @@ class InputManager(object):
         config = {
             "llm_post_escape_n": self.llm_post_escape_n,
             "conditional_continuation": self.conditional_continuation,
-            "conditional_threshold": self.conditional_threshold,
             "disable_llm": self.disable_llm,
             "app": self.app.app_name if self.app else None,
         }

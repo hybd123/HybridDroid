@@ -49,17 +49,24 @@ def parse_args():
 
     # ---- experiment: single-step vs multi-step LLM ----
     parser.add_argument("-llm_n", action="store", dest="llm_post_escape_n", default=0, type=int,
-                        help="Number of extra LLM steps AFTER escaping a tarpit (0 = current single-step behaviour). "
-                             "Use -disable_llm for the pure-random baseline.")
+                        help="[Fixed-N mode] Number of extra LLM steps AFTER escaping a tarpit. "
+                             "0 = current single-step behaviour (LLM on tarpit only, no post-escape steps). "
+                             "Mutually exclusive with -conditional.")
     parser.add_argument("-conditional", action="store_true", dest="conditional_continuation",
-                        help="Enable conditional continuation: keep using LLM after escape only while the "
-                             "new state has fewer than -cond_threshold interactive widgets.")
-    parser.add_argument("-cond_threshold", action="store", dest="conditional_threshold", default=8, type=int,
-                        help="Widget count threshold for conditional continuation (default: 8).")
+                        help="[Conditional mode] After escaping a tarpit, keep using LLM as long as the "
+                             "post-escape page shares the same content-free view-tree structure as the tarpit "
+                             "(i.e. structurally we haven't moved yet). Mutually exclusive with -llm_n > 0.")
     parser.add_argument("-disable_llm", action="store_true", dest="disable_llm",
-                        help="Disable LLM entirely (pure-random baseline, equivalent to N=0 on the x-axis).")
+                        help="Disable LLM entirely (pure-random baseline, x-axis N=0).")
 
     options = parser.parse_args()
+
+    if options.llm_post_escape_n > 0 and options.conditional_continuation:
+        parser.error("-llm_n and -conditional are mutually exclusive: "
+                     "use one mode at a time.")
+    if options.disable_llm and (options.llm_post_escape_n > 0 or options.conditional_continuation):
+        parser.error("-disable_llm cannot be combined with -llm_n or -conditional.")
+
     return options
 
 
@@ -94,7 +101,6 @@ def main():
         ignore_ad=opts.ignore_ad,
         llm_post_escape_n=opts.llm_post_escape_n,
         conditional_continuation=opts.conditional_continuation,
-        conditional_threshold=opts.conditional_threshold,
         disable_llm=opts.disable_llm,
     )
     droidbot.start()

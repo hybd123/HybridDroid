@@ -99,27 +99,28 @@ class UITarpitDetector(object):
             print(f'tarpit name:{tarpit_name}, info: {tarpit_info}')
         print(f'total tarpits:{len(self.tarpits)}')
     
-    def check_or_add_new_trap(self, screenshot,tag):
+    def check_or_add_new_trap(self, screenshot, tag, structure_str=None):
         """检查或添加新的UI陷阱"""
-        # 检查是否已有相似的陷阱
         for tarpit_name, tarpit_info in self.tarpits.items():
             tarpit_img = tarpit_info['screen_shoot']
             similarity = self.calculate_similarity(screenshot, tarpit_img)
             if similarity >= REUSE_THREGHOLD:
                 self.logger.info(f"Visiting known tarpit: {tarpit_name}")
-                self.tarpits[tarpit_name]['count'] = int(self.tarpits[tarpit_name]['count']) + 1 # 增加count并保存
+                self.tarpits[tarpit_name]['count'] = int(self.tarpits[tarpit_name]['count']) + 1
                 return True, tarpit_name
         # add a new tarpit
         new_tarpit_name = f"trap_{len(self.tarpits) + 1}"
-        # dest_screenshot_path = "%s/screen_%s.png" % (self.tarpit_save_dir,tag)
-        # if screenshot != dest_screenshot_path:
-        #         import shutil
-        #         shutil.copyfile(screenshot, dest_screenshot_path)
-        self.tarpits[new_tarpit_name] = {'screen_shoot': screenshot, 'count': 1, 'actions':[]}
-        # self.to_save_tarpits[new_tarpit_name] = {'screen_shoot': screenshot, 'count': 1, 'actions':[]}
-        # self.save_ui_tarpits()
+        self.tarpits[new_tarpit_name] = {
+            'screen_shoot': screenshot,
+            'structure_str': structure_str,
+            'count': 1,
+            'actions': [],
+        }
         self.logger.info(f"New UI tarpit saved: {new_tarpit_name}")
         return False, new_tarpit_name
+
+    def get_tarpit_structure_str(self, tarpit_name):
+        return self.tarpits[tarpit_name].get('structure_str')
 
     def update_tarpit_actions(self, tarpit_name, event):
         self.tarpits[tarpit_name]['actions'].append(event)

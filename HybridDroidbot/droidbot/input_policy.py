@@ -54,7 +54,6 @@ class InputPolicy(object):
     def __init__(self, device, app,
                  llm_post_escape_n=0,
                  conditional_continuation=False,
-                 conditional_threshold=8,
                  disable_llm=False):
         self.logger = logging.getLogger(self.__class__.__name__)
         self.device = device
@@ -72,7 +71,6 @@ class InputPolicy(object):
         # experiment parameters
         self.llm_post_escape_n = llm_post_escape_n
         self.conditional_continuation = conditional_continuation
-        self.conditional_threshold = conditional_threshold
         self.disable_llm = disable_llm
 
     def start(self, input_manager):
@@ -83,8 +81,8 @@ class InputPolicy(object):
         tarpit_name = None
         # --- multi-step experiment state ---
         _prev_in_tarpit = False
-        _post_escape_remaining = 0
-        _tarpit_entry_activity = None  # activity when we first entered the tarpit
+        _post_escape_remaining = 0   # only used in Fixed-N mode
+        _tarpit_structure_str = None  # structure_str of the tarpit state (for escape classification)
 
         while input_manager.enabled and self.action_count < input_manager.event_count:
             try:
@@ -104,38 +102,43 @@ class InputPolicy(object):
 
                     # ---- escape detection ----
                     just_escaped = _prev_in_tarpit and not currently_in_tarpit
-                    # update _prev_in_tarpit BEFORE any `continue`, so reuse path is handled correctly
+                    # update _prev_in_tarpit BEFORE any `continue` so reuse path is handled correctly
                     _prev_in_tarpit = currently_in_tarpit
 
                     if just_escaped:
-                        _post_escape_remaining = self.llm_post_escape_n
+                        if not self.conditional_continuation:
+                            _post_escape_remaining = self.llm_post_escape_n
                         if input_manager.metrics_logger:
                             input_manager.metrics_logger.on_escape(
                                 self.action_count, self.current_state,
-                                tarpit_name, _tarpit_entry_activity,
+                                _tarpit_structure_str, tarpit_name,
                             )
 
                     # ---- decide whether to use post-escape LLM ----
                     use_post_escape_llm = False
-                    if not currently_in_tarpit and _post_escape_remaining > 0:
+                    if not currently_in_tarpit:
                         if self.conditional_continuation:
-                            n_actions = len(self.current_state.get_possible_input())
-                            if n_actions < self.conditional_threshold:
+                            # Continue with LLM as long as the current page still looks
+                            # structurally similar to the tarpit (fragment-aware: uses
+                            # content-free view-tree hash, not activity name).
+                            if (_tarpit_structure_str is not None and
+                                    self.current_state.structure_str == _tarpit_structure_str):
                                 use_post_escape_llm = True
-                            else:
-                                _post_escape_remaining = 0
-                        else:
+                            # once structure differs we stop automatically (no counter needed)
+                        elif _post_escape_remaining > 0:
                             use_post_escape_llm = True
                             _post_escape_remaining -= 1
 
                     # ---- dispatch ----
                     if currently_in_tarpit:
-                        if _tarpit_entry_activity is None:
-                            _tarpit_entry_activity = self.current_state.foreground_activity
+                        # record the tarpit's structure on first entry
+                        if _tarpit_structure_str is None:
+                            _tarpit_structure_str = self.current_state.structure_str
 
                         current_state_screen = self.current_state.get_state_screen()
                         is_known_tarpit, tarpit_name = input_manager.sim_calculator.check_or_add_new_trap(
-                            current_state_screen, self.action_count)
+                            current_state_screen, self.action_count,
+                            structure_str=self.current_state.structure_str)
                         if is_known_tarpit:
                             # if it is a known ui tarpit, randomly choose between llm policy and reuse
                             if random.random() < 0.5:
@@ -168,7 +171,7 @@ class InputPolicy(object):
 
                     else:
                         tarpit_name = None
-                        _tarpit_entry_activity = None
+                        _tarpit_structure_str = None
                         event = self.generate_event()
 
                     # ---- metrics ----
@@ -416,13 +419,11 @@ class UtgRandomPolicy(InputPolicy):
                  clear_and_restart_app_data_after_100_events=False,
                  llm_post_escape_n=0,
                  conditional_continuation=False,
-                 conditional_threshold=8,
                  disable_llm=False):
         super(UtgRandomPolicy, self).__init__(
             device, app,
             llm_post_escape_n=llm_post_escape_n,
             conditional_continuation=conditional_continuation,
-            conditional_threshold=conditional_threshold,
             disable_llm=disable_llm,
         )
         self.number_of_events_that_restart_app = number_of_events_that_restart_app
