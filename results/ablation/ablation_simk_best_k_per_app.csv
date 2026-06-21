@@ -1,0 +1,13 @@
+App,k=8 Line(%),Max Line(%),Best k(s),k=8 is unique best,k=8 tied for best,Winner if not k=8
+AlarmClock,79.522,79.522,8,Yes,Yes,
+AmazeFileManager,36.502,36.502,8,Yes,Yes,
+AnkiDroid,40.140,40.140,8,Yes,Yes,
+AntennaPod,49.716,49.716,8,Yes,Yes,
+Chess,34.160,44.414,10,No,No,10
+Feeder,46.826,46.826,8,Yes,Yes,
+MyExpenses,32.706,32.706,8,Yes,Yes,
+NewPipe,46.287,46.287,8,Yes,Yes,
+Omni-Notes,39.340,40.060,10,No,No,10
+OwnTracks,62.043,62.043,8,Yes,Yes,
+RedReader,25.153,25.153,8,Yes,Yes,
+Wikipedia,14.860,15.250,6,No,No,6

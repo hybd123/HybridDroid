@@ -1,0 +1,25 @@
+Comparison,Metric,Mean Diff (%),p (two-sided),Significant (α=0.05)
+HybridMonkey vs Monkey,Line,13.19,<0.001,Yes
+HybridMonkey vs Monkey,Branch,10.28,<0.001,Yes
+HybridMonkey vs Monkey,Method,14.03,<0.001,Yes
+HybridMonkey vs Monkey,Class,13.28,<0.001,Yes
+HybridMonkey vs Monkey*,Line,6.56,<0.001,Yes
+HybridMonkey vs Monkey*,Branch,5.3,<0.001,Yes
+HybridMonkey vs Monkey*,Method,7.09,<0.001,Yes
+HybridMonkey vs Monkey*,Class,6.17,0.0068,Yes
+HybridMonkey vs Fastbot,Line,9.05,0.0015,Yes
+HybridMonkey vs Fastbot,Branch,6.63,0.0161,Yes
+HybridMonkey vs Fastbot,Method,10.18,0.0024,Yes
+HybridMonkey vs Fastbot,Class,9.36,<0.001,Yes
+HybridDroid vs Droidbot*,Line,8.21,0.0024,Yes
+HybridDroid vs Droidbot*,Branch,6.84,0.0034,Yes
+HybridDroid vs Droidbot*,Method,8.81,0.0015,Yes
+HybridDroid vs Droidbot*,Class,8.77,<0.001,Yes
+HybridDroid vs Monkey,Line,10.39,<0.001,Yes
+HybridDroid vs Monkey,Branch,8.12,<0.001,Yes
+HybridDroid vs Monkey,Method,10.87,<0.001,Yes
+HybridDroid vs Monkey,Class,10.53,<0.001,Yes
+HybridDroid vs Fastbot,Line,6.25,0.0210,Yes
+HybridDroid vs Fastbot,Branch,4.47,0.0425,Yes
+HybridDroid vs Fastbot,Method,7.02,0.0161,Yes
+HybridDroid vs Fastbot,Class,6.62,0.0093,Yes
