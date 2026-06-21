@@ -47,7 +47,11 @@ class DroidBot(object):
                  master=None,
                  humanoid=None,
                  ignore_ad=False,
-                 replay_output=None):
+                 replay_output=None,
+                 llm_post_escape_n=0,
+                 conditional_continuation=False,
+                 conditional_threshold=8,
+                 disable_llm=False):
         """
         initiate droidbot with configurations
         :return:
@@ -114,7 +118,12 @@ class DroidBot(object):
                 script_path=script_path,
                 profiling_method=profiling_method,
                 master=master,
-                replay_output=replay_output)
+                replay_output=replay_output,
+                llm_post_escape_n=llm_post_escape_n,
+                conditional_continuation=conditional_continuation,
+                conditional_threshold=conditional_threshold,
+                disable_llm=disable_llm,
+            )
         except Exception:
             import traceback
             traceback.print_exc()

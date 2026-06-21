@@ -46,8 +46,20 @@ def parse_args():
                         help="Enable the accessibility service automatically even though it might require device restart\n(can be useful for Android API level < 23).")
     parser.add_argument("-ignore_ad", action="store_true", dest="ignore_ad",
                         help="Ignore Ad views by checking resource_id.")
+
+    # ---- experiment: single-step vs multi-step LLM ----
+    parser.add_argument("-llm_n", action="store", dest="llm_post_escape_n", default=0, type=int,
+                        help="Number of extra LLM steps AFTER escaping a tarpit (0 = current single-step behaviour). "
+                             "Use -disable_llm for the pure-random baseline.")
+    parser.add_argument("-conditional", action="store_true", dest="conditional_continuation",
+                        help="Enable conditional continuation: keep using LLM after escape only while the "
+                             "new state has fewer than -cond_threshold interactive widgets.")
+    parser.add_argument("-cond_threshold", action="store", dest="conditional_threshold", default=8, type=int,
+                        help="Widget count threshold for conditional continuation (default: 8).")
+    parser.add_argument("-disable_llm", action="store_true", dest="disable_llm",
+                        help="Disable LLM entirely (pure-random baseline, equivalent to N=0 on the x-axis).")
+
     options = parser.parse_args()
-    # print options
     return options
 
 
@@ -69,7 +81,6 @@ def main():
         is_emulator=opts.is_emulator,
         output_dir=opts.output_dir,
         env_policy=env_manager.POLICY_NONE,
-        # policy_name=input_manager.POLICY_TASK,
         policy_name=input_policy.POLICY_RANDOM,
         script_path=opts.script_path,
         event_interval=opts.interval,
@@ -80,7 +91,12 @@ def main():
         keep_env=opts.keep_env,
         grant_perm=opts.grant_perm,
         enable_accessibility_hard=opts.enable_accessibility_hard,
-        ignore_ad=opts.ignore_ad)
+        ignore_ad=opts.ignore_ad,
+        llm_post_escape_n=opts.llm_post_escape_n,
+        conditional_continuation=opts.conditional_continuation,
+        conditional_threshold=opts.conditional_threshold,
+        disable_llm=opts.disable_llm,
+    )
     droidbot.start()
 
 

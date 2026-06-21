@@ -51,7 +51,11 @@ class InputPolicy(object):
     It should call AppEventManager.send_event method continuously
     """
 
-    def __init__(self, device, app):
+    def __init__(self, device, app,
+                 llm_post_escape_n=0,
+                 conditional_continuation=False,
+                 conditional_threshold=8,
+                 disable_llm=False):
         self.logger = logging.getLogger(self.__class__.__name__)
         self.device = device
         self.app = app
@@ -65,6 +69,11 @@ class InputPolicy(object):
         self.__all_action_history=set()
         self.llm_event = []
         self.reuse_event = []
+        # experiment parameters
+        self.llm_post_escape_n = llm_post_escape_n
+        self.conditional_continuation = conditional_continuation
+        self.conditional_threshold = conditional_threshold
+        self.disable_llm = disable_llm
 
     def start(self, input_manager):
         """
@@ -72,6 +81,11 @@ class InputPolicy(object):
         :param input_manager: instance of InputManager
         """
         tarpit_name = None
+        # --- multi-step experiment state ---
+        _prev_in_tarpit = False
+        _post_escape_remaining = 0
+        _tarpit_entry_activity = None  # activity when we first entered the tarpit
+
         while input_manager.enabled and self.action_count < input_manager.event_count:
             try:
                 self.current_state = self.device.get_current_state(self.action_count)
@@ -80,42 +94,93 @@ class InputPolicy(object):
                 if self.action_count == 0 and self.master is None:
                     event = KeyEvent(name="HOME")
                 elif self.action_count == 1 and self.master is None:
-                    event = IntentEvent(self.app.get_start_intent())    
+                    event = IntentEvent(self.app.get_start_intent())
                 else:
-                    if input_manager.sim_calculator.detected_ui_tarpit(input_manager):
-                        # if detected a ui tarpit, then stop random policy and start llm policy
+                    currently_in_tarpit = (
+                        False
+                        if self.disable_llm
+                        else input_manager.sim_calculator.detected_ui_tarpit(input_manager)
+                    )
+
+                    # ---- escape detection ----
+                    just_escaped = _prev_in_tarpit and not currently_in_tarpit
+                    # update _prev_in_tarpit BEFORE any `continue`, so reuse path is handled correctly
+                    _prev_in_tarpit = currently_in_tarpit
+
+                    if just_escaped:
+                        _post_escape_remaining = self.llm_post_escape_n
+                        if input_manager.metrics_logger:
+                            input_manager.metrics_logger.on_escape(
+                                self.action_count, self.current_state,
+                                tarpit_name, _tarpit_entry_activity,
+                            )
+
+                    # ---- decide whether to use post-escape LLM ----
+                    use_post_escape_llm = False
+                    if not currently_in_tarpit and _post_escape_remaining > 0:
+                        if self.conditional_continuation:
+                            n_actions = len(self.current_state.get_possible_input())
+                            if n_actions < self.conditional_threshold:
+                                use_post_escape_llm = True
+                            else:
+                                _post_escape_remaining = 0
+                        else:
+                            use_post_escape_llm = True
+                            _post_escape_remaining -= 1
+
+                    # ---- dispatch ----
+                    if currently_in_tarpit:
+                        if _tarpit_entry_activity is None:
+                            _tarpit_entry_activity = self.current_state.foreground_activity
+
                         current_state_screen = self.current_state.get_state_screen()
-                        is_known_tarpit, tarpit_name = input_manager.sim_calculator.check_or_add_new_trap(current_state_screen,self.action_count)
+                        is_known_tarpit, tarpit_name = input_manager.sim_calculator.check_or_add_new_trap(
+                            current_state_screen, self.action_count)
                         if is_known_tarpit:
-                            # if it is a known ui tarpit, randomly choose between llm policy and resue
+                            # if it is a known ui tarpit, randomly choose between llm policy and reuse
                             if random.random() < 0.5:
                                 tarpit_actions = input_manager.sim_calculator.get_tarpit_actions_by_name(tarpit_name)
                                 if len(tarpit_actions) > 0:
-                                    self.execute_tarpit_actions(tarpit_actions,input_manager,self.llm_event,self.reuse_event)
+                                    self.execute_tarpit_actions(tarpit_actions, input_manager, self.llm_event, self.reuse_event)
                                     continue
                         if input_manager.sim_calculator.sim_count > MAX_NUM_QUERY_LLM:
-                            # if quey llm too much, then return back
                             self.logger.info(f'query too much. go back!')
                             event = KeyEvent(name="BACK")
                             self.clear_action_history()
                             input_manager.sim_calculator.sim_count = 0
                         else:
-                            llm_policy = HybirdPolicy(self.device,self.app,input_manager.random_input,self.action_count, self.__activity_history, self.__action_history,self.current_state)
+                            llm_policy = HybirdPolicy(self.device, self.app, input_manager.random_input,
+                                                      self.action_count, self.__activity_history,
+                                                      self.__action_history, self.current_state)
                             event = llm_policy.generate_event()
-                            self.llm_event.append(int(self.action_count)) 
-                        input_manager.sim_calculator.update_tarpit_actions(tarpit_name,event)
+                            self.llm_event.append(int(self.action_count))
+                        input_manager.sim_calculator.update_tarpit_actions(tarpit_name, event)
+
+                    elif use_post_escape_llm:
+                        # post-escape LLM step: fresh policy instance, shared action history
+                        llm_policy = HybirdPolicy(self.device, self.app, input_manager.random_input,
+                                                  self.action_count, self.__activity_history,
+                                                  self.__action_history, self.current_state)
+                        event = llm_policy.generate_event()
+                        self.llm_event.append(int(self.action_count))
+                        self.logger.info(
+                            f"post-escape LLM step (remaining after this: {_post_escape_remaining})")
+
                     else:
                         tarpit_name = None
+                        _tarpit_entry_activity = None
                         event = self.generate_event()
+
+                    # ---- metrics ----
+                    if input_manager.metrics_logger:
+                        input_manager.metrics_logger.on_event(
+                            event, self.current_state, self.action_count)
+
                 self.last_event = event
                 self.last_state = self.current_state
                 self.__activity_history.add(self.current_state.foreground_activity)
                 self.current_state.save2dir(input_manager.img_output, event)
-                # execute event
                 input_manager.add_event(event)
-                # if tarpit_name and not input_manager.sim_calculator.is_similar_page(input_manager,self.device.get_current_state()):
-                #     # after execute event, if it enter different ui page, then add valid trap action
-                #     input_manager.sim_calculator.update_tarpit_actions(tarpit_name,event)
                 self.action_count += 1
             except KeyboardInterrupt:
                 break
@@ -124,7 +189,7 @@ class InputPolicy(object):
                 break
             except AttributeError as e:
                 self.logger.error("AttributeError: %s" % e)
-                continue  # 处理属性错误
+                continue
             except Exception as e:
                 self.logger.warning("exception during sending events: %s" % e)
                 import traceback
@@ -346,9 +411,19 @@ class UtgRandomPolicy(InputPolicy):
     random input policy based on UTG
     """
 
-    def __init__(self, device, app, random_input=True, number_of_events_that_restart_app=100, clear_and_restart_app_data_after_100_events=False):
+    def __init__(self, device, app, random_input=True,
+                 number_of_events_that_restart_app=100,
+                 clear_and_restart_app_data_after_100_events=False,
+                 llm_post_escape_n=0,
+                 conditional_continuation=False,
+                 conditional_threshold=8,
+                 disable_llm=False):
         super(UtgRandomPolicy, self).__init__(
-            device, app
+            device, app,
+            llm_post_escape_n=llm_post_escape_n,
+            conditional_continuation=conditional_continuation,
+            conditional_threshold=conditional_threshold,
+            disable_llm=disable_llm,
         )
         self.number_of_events_that_restart_app = number_of_events_that_restart_app
         self.clear_and_restart_app_data_after_100_events = clear_and_restart_app_data_after_100_events

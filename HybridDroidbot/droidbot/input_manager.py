@@ -5,6 +5,7 @@ import time
 
 from .input_event import EventLog
 from .input_policy import *
+from .metrics_logger import MetricsLogger
 from .similarity import *
 
 DEFAULT_POLICY = POLICY_RANDOM
@@ -25,7 +26,11 @@ class InputManager(object):
     def __init__(self, device, app, task, policy_name, random_input,
                  event_count, event_interval,
                  script_path=None, profiling_method=None, master=None,
-                 replay_output=None):
+                 replay_output=None,
+                 llm_post_escape_n=0,
+                 conditional_continuation=False,
+                 conditional_threshold=8,
+                 disable_llm=False):
         """
         manage input event sent to the target device
         :param device: instance of Device
@@ -49,10 +54,17 @@ class InputManager(object):
         self.replay_output = replay_output
         self.img_output = os.path.join(self.device.output_dir, "all_states")
         
-        self.sim_calculator = UITarpitDetector(DEFAULT_UI_TARPIT_NUM,device)
-        # self.llm_events = []
-
+        self.sim_calculator = UITarpitDetector(DEFAULT_UI_TARPIT_NUM, device)
         self.monkey = None
+
+        # experiment parameters
+        self.llm_post_escape_n = llm_post_escape_n
+        self.conditional_continuation = conditional_continuation
+        self.conditional_threshold = conditional_threshold
+        self.disable_llm = disable_llm
+
+        # metrics logger (created after policy so output_dir is known)
+        self.metrics_logger = None
 
         if script_path is not None:
             f = open(script_path, 'r')
@@ -75,14 +87,27 @@ class InputManager(object):
         elif self.policy_name == POLICY_HYBIRD:
             input_policy = HybirdPolicy(device, app, self.random_input)
         elif self.policy_name == POLICY_RANDOM:
-            input_policy = UtgRandomPolicy(device, app, self.random_input)
+            input_policy = UtgRandomPolicy(
+                device, app, self.random_input,
+                llm_post_escape_n=self.llm_post_escape_n,
+                conditional_continuation=self.conditional_continuation,
+                conditional_threshold=self.conditional_threshold,
+                disable_llm=self.disable_llm,
+            )
         else:
             self.logger.warning("No valid input policy specified. Using policy \"none\".")
             input_policy = None
-        # if isinstance(input_policy, UtgBasedInputPolicy):
-        #     input_policy.script = self.script
-        #     input_policy.master = master
         return input_policy
+
+    def _init_metrics_logger(self):
+        config = {
+            "llm_post_escape_n": self.llm_post_escape_n,
+            "conditional_continuation": self.conditional_continuation,
+            "conditional_threshold": self.conditional_threshold,
+            "disable_llm": self.disable_llm,
+            "app": self.app.app_name if self.app else None,
+        }
+        self.metrics_logger = MetricsLogger(self.device.output_dir, config)
 
     def add_event(self, event):
         """
@@ -108,6 +133,7 @@ class InputManager(object):
         """
         start sending event
         """
+        self._init_metrics_logger()
         self.logger.info("start sending events, policy is %s" % self.policy_name)
 
         try:
@@ -166,4 +192,6 @@ class InputManager(object):
         self.enabled = False
         utils.generate_report(img_path=self.img_output, html_path=self.device.output_dir, bug_information=None, llm_event=self.policy.llm_event,reuse_event=self.policy.reuse_event)
         self.sim_calculator.print_ui_tarpits()
+        if self.metrics_logger:
+            self.metrics_logger.save()
 
