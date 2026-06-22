@@ -81,8 +81,8 @@ class InputPolicy(object):
         tarpit_name = None
         # --- multi-step experiment state ---
         _prev_in_tarpit = False
-        _post_escape_remaining = 0   # only used in Fixed-N mode
-        _tarpit_structure_str = None  # structure_str of the tarpit state (for escape classification)
+        _post_escape_remaining = 0      # Fixed-N mode: steps remaining after escape
+        _continue_conditional = False   # Conditional mode: LLM says "intermediate", keep going
 
         while input_manager.enabled and self.action_count < input_manager.event_count:
             try:
@@ -108,33 +108,25 @@ class InputPolicy(object):
                     if just_escaped:
                         if not self.conditional_continuation:
                             _post_escape_remaining = self.llm_post_escape_n
+                        # _continue_conditional is set based on LLM's is_terminal from the
+                        # escape-triggering call; handled inside the tarpit dispatch block below
                         if input_manager.metrics_logger:
                             input_manager.metrics_logger.on_escape(
-                                self.action_count, self.current_state,
-                                _tarpit_structure_str, tarpit_name,
-                            )
+                                self.action_count, self.current_state, tarpit_name)
+                            input_manager.metrics_logger.on_escape_classify(
+                                input_manager.sim_calculator)
 
                     # ---- decide whether to use post-escape LLM ----
                     use_post_escape_llm = False
                     if not currently_in_tarpit:
-                        if self.conditional_continuation:
-                            # Continue with LLM as long as the current page still looks
-                            # structurally similar to the tarpit (fragment-aware: uses
-                            # content-free view-tree hash, not activity name).
-                            if (_tarpit_structure_str is not None and
-                                    self.current_state.structure_str == _tarpit_structure_str):
-                                use_post_escape_llm = True
-                            # once structure differs we stop automatically (no counter needed)
-                        elif _post_escape_remaining > 0:
+                        if self.conditional_continuation and _continue_conditional:
+                            use_post_escape_llm = True
+                        elif not self.conditional_continuation and _post_escape_remaining > 0:
                             use_post_escape_llm = True
                             _post_escape_remaining -= 1
 
                     # ---- dispatch ----
                     if currently_in_tarpit:
-                        # record the tarpit's structure on first entry
-                        if _tarpit_structure_str is None:
-                            _tarpit_structure_str = self.current_state.structure_str
-
                         current_state_screen = self.current_state.get_state_screen()
                         is_known_tarpit, tarpit_name = input_manager.sim_calculator.check_or_add_new_trap(
                             current_state_screen, self.action_count,
@@ -151,27 +143,44 @@ class InputPolicy(object):
                             event = KeyEvent(name="BACK")
                             self.clear_action_history()
                             input_manager.sim_calculator.sim_count = 0
+                            _continue_conditional = False
                         else:
                             llm_policy = HybirdPolicy(self.device, self.app, input_manager.random_input,
                                                       self.action_count, self.__activity_history,
                                                       self.__action_history, self.current_state)
                             event = llm_policy.generate_event()
                             self.llm_event.append(int(self.action_count))
+                            # In conditional mode: remember whether LLM expects this to be
+                            # an intermediate action (so we continue after escape) or terminal.
+                            if self.conditional_continuation:
+                                _continue_conditional = not llm_policy.last_is_terminal
+                                self.logger.info(
+                                    f"[conditional] LLM predicts: "
+                                    f"{'intermediate → will continue after escape' if _continue_conditional else 'complete → will return to random after escape'}"
+                                )
                         input_manager.sim_calculator.update_tarpit_actions(tarpit_name, event)
 
                     elif use_post_escape_llm:
-                        # post-escape LLM step: fresh policy instance, shared action history
+                        # post-escape LLM step (Fixed-N or Conditional): fresh instance, shared history
                         llm_policy = HybirdPolicy(self.device, self.app, input_manager.random_input,
                                                   self.action_count, self.__activity_history,
                                                   self.__action_history, self.current_state)
                         event = llm_policy.generate_event()
                         self.llm_event.append(int(self.action_count))
-                        self.logger.info(
-                            f"post-escape LLM step (remaining after this: {_post_escape_remaining})")
+                        if self.conditional_continuation:
+                            # update continuation flag based on this step's LLM prediction
+                            _continue_conditional = not llm_policy.last_is_terminal
+                            self.logger.info(
+                                f"[conditional post-escape] LLM predicts: "
+                                f"{'intermediate → continue' if _continue_conditional else 'complete → stop'}"
+                            )
+                        else:
+                            self.logger.info(
+                                f"[fixed-N post-escape] remaining after this: {_post_escape_remaining}")
 
                     else:
                         tarpit_name = None
-                        _tarpit_structure_str = None
+                        _continue_conditional = False
                         event = self.generate_event()
 
                     # ---- metrics ----
@@ -236,9 +245,10 @@ class InputPolicy(object):
 
 
 class HybirdPolicy(InputPolicy):
-    def __init__(self, device, app, random_input, action_count, activity_history, action_history,current_state):
+    def __init__(self, device, app, random_input, action_count, activity_history, action_history, current_state):
         super(HybirdPolicy, self).__init__(device, app)
         self.logger = logging.getLogger(self.__class__.__name__)
+        self.last_is_terminal = True  # LLM's prediction: was the chosen action a terminal transition?
         self.task = "You are an expert in App GUI testing. Please guide the testing tool to enhance the coverage of functional scenarios in testing the App based on your extensive App testing experience. "
         self.random_input = random_input
         self.__nav_target = None
@@ -335,7 +345,9 @@ class HybirdPolicy(InputPolicy):
             # If the app is in foreground
             self.__num_steps_outside = 0
 
-        action, candidate_actions, action_id = self._get_action_with_LLM(current_state, self.__action_history,self.__activity_history,self.__all_action_history)
+        action, candidate_actions, action_id, is_terminal = self._get_action_with_LLM(
+            current_state, self.__action_history, self.__activity_history, self.__all_action_history)
+        self.last_is_terminal = is_terminal
         if action is not None:
             action_str = f"{current_state.get_action_desc(action)} ({action_id})"
             self.__action_history.append(action_str)
@@ -376,37 +388,61 @@ class HybirdPolicy(InputPolicy):
         res = completion.choices[0].message.content
         return res
 
-    def _get_action_with_LLM(self, current_state, action_history,activity_history,all_action_history):
+    def _get_action_with_LLM(self, current_state, action_history, activity_history, all_action_history):
         activity = current_state.foreground_activity
-        task_prompt = self.task +f"Currently, the App is stuck on the {activity} page, unable to explore more features. You task is to select an action based on the current GUI Infomation to perform next and help the app escape the UI tarpit."
-        # visisted_page_prompt = f'I have already visited the following activities: \n' + '\n'.join(activity_history)
-        # all_history_prompt = f'I have already completed the following actions to explore the app: \n' + '\n'.join(all_action_history)
-        history_prompt = f'I have already tried the following steps with action id in parentheses which should not be selected anymore: \n ' + ';\n '.join(action_history)
+        task_prompt = (
+            self.task +
+            f"Currently, the App is stuck on the {activity} page, unable to explore more features. "
+            f"Your task is to select an action based on the current GUI information to perform next "
+            f"and help the app escape the UI tarpit."
+        )
+        history_prompt = (
+            f'I have already tried the following steps with action id in parentheses '
+            f'which should not be selected anymore: \n ' + ';\n '.join(action_history)
+        )
         state_prompt, candidate_actions = current_state.get_described_actions()
-        question = 'Which action should I choose next? Just return the action id and nothing else.\nIf no more action is needed, return -1.'
+        question = (
+            'Which action should I choose next?\n'
+            'Line 1: the action id (integer). If no more action is needed, return -1.\n'
+            'Line 2: "complete" if executing this action is expected to achieve a genuine '
+            'functional transition (navigates to a meaningfully new screen or completes an '
+            'operation, e.g. Subscribe, Confirm, Submit, Save); '
+            'or "intermediate" if it only opens an intermediate state that still needs further '
+            'actions to reach the target (e.g. opens a menu, dialog, filter panel, or '
+            'navigation drawer). Return exactly one of: complete / intermediate.'
+        )
         prompt = f'{task_prompt}\n{state_prompt}\n{history_prompt}\n{question}'
         print(prompt)
         response = self._query_llm(prompt)
         print(f'response: {response}')
-        # if '-1' in response:
-            # input(f"Seems the task is completed. Press Enter to continue...")
 
-        match = re.search(r'\d+', response)
+        lines = response.strip().split('\n')
+        match = re.search(r'-?\d+', lines[0])
         if not match:
-            return None, candidate_actions
+            return None, candidate_actions, None, True
+
         idx = int(match.group(0))
+        if idx < 0 or idx >= len(candidate_actions):
+            return None, candidate_actions, None, True
+
+        # parse is_terminal from second line (default True = treat as complete)
+        is_terminal = True
+        if len(lines) > 1 and 'intermediate' in lines[1].lower():
+            is_terminal = False
+
         selected_action = candidate_actions[idx]
         if isinstance(selected_action, SetTextEvent):
             view_text = current_state.get_view_desc(selected_action.view)
-            question = f'What text should I enter to the {view_text}? Just return the text and nothing else.'
-            prompt = f'{task_prompt}\n{state_prompt}\n{question}'
-            print(prompt)
-            response = self._query_llm(prompt)
-            print(f'response: {response}')
-            selected_action.text = response.replace('"', '')
+            text_question = f'What text should I enter to the {view_text}? Just return the text and nothing else.'
+            text_prompt = f'{task_prompt}\n{state_prompt}\n{text_question}'
+            print(text_prompt)
+            text_response = self._query_llm(text_prompt)
+            print(f'response: {text_response}')
+            selected_action.text = text_response.replace('"', '')
             if len(selected_action.text) > 30:  # heuristically disable long text input
                 selected_action.text = ''
-        return selected_action, candidate_actions ,idx
+
+        return selected_action, candidate_actions, idx, is_terminal
 
     
 class UtgRandomPolicy(InputPolicy):

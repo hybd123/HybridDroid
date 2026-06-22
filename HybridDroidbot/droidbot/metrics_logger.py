@@ -25,42 +25,48 @@ class MetricsLogger:
     # Public hooks called from InputPolicy.start()
     # ------------------------------------------------------------------
 
-    def on_escape(self, step, current_state, tarpit_state_str, tarpit_structure_str, tarpit_name):
+    def on_escape(self, step, current_state, tarpit_name):
         """Called the first step AFTER a tarpit escape is confirmed.
 
-        escape_type is determined by comparing view-tree structure hashes:
-          functional → structure_str differs from tarpit (new layout = new screen)
-          partial    → same structure_str (same layout, e.g. a dialog opened)
+        escape_type uses structure_str (content-free view-tree hash) so that
+        Fragment-based single-Activity apps are classified correctly:
+          functional → structure_str differs from the stored tarpit structure
+          partial    → same structure_str (layout unchanged; e.g. a dialog opened)
 
-        Using structure_str (content-free) rather than activity so that
-        single-Activity / Fragment-based apps are handled correctly.
+        The tarpit's structure_str is read from sim_calculator if available;
+        otherwise we fall back to marking the escape as functional.
         """
         if self._current_escape is not None:
             self._finalize_escape()
 
-        escape_type = (
-            "functional"
-            if current_state.structure_str != tarpit_structure_str
-            else "partial"
-        )
-
         self._current_escape = {
             "step": step,
             "tarpit_name": tarpit_name,
-            "tarpit_structure_str": tarpit_structure_str,
             "post_escape_activity": current_state.foreground_activity,
             "post_escape_structure_str": current_state.structure_str,
             "state_str": current_state.state_str,
-            "escape_type": escape_type,
+            # escape_type is patched in by the caller via on_escape_classify()
+            "escape_type": "unknown",
             "event_type_counts": collections.Counter(),
             "new_states_in_window": 0,
             "total_window_steps": 0,
         }
         self._steps_in_window = 0
-        self.logger.info(
-            f"[metrics] escape at step {step}: {escape_type} "
-            f"(structure {'changed' if escape_type == 'functional' else 'unchanged'})"
-        )
+        self.logger.info(f"[metrics] escape detected at step {step} from tarpit {tarpit_name}")
+
+    def on_escape_classify(self, sim_calculator):
+        """Classify the current escape as functional/partial using the tarpit's stored structure_str."""
+        if self._current_escape is None:
+            return
+        tarpit_name = self._current_escape["tarpit_name"]
+        tarpit_structure_str = sim_calculator.get_tarpit_structure_str(tarpit_name) if tarpit_name else None
+        post_structure = self._current_escape["post_escape_structure_str"]
+        if tarpit_structure_str is None:
+            escape_type = "functional"  # no reference to compare → assume escaped
+        else:
+            escape_type = "functional" if post_structure != tarpit_structure_str else "partial"
+        self._current_escape["escape_type"] = escape_type
+        self.logger.info(f"[metrics] escape_type={escape_type}")
 
     def on_event(self, event, current_state, step):
         """Called after every event (except the very first two startup events)."""
