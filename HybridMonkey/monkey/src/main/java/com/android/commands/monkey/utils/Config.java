@@ -126,6 +126,12 @@ public class Config {
      * enable clear package, adb shell pm clear
      */
     public static final boolean clearPackage = Config.getBoolean("max.clearPackage", false);
+
+    // ---- Single-step vs Multi-step LLM ablation experiment ----
+    /** Extra LLM steps after escaping a tarpit. 0 = current single-step behaviour. */
+    public static final int llmPostEscapeN = Config.getInteger("max.llmPostEscapeN", 0);
+    /** Disable LLM entirely (pure-random baseline). */
+    public static final boolean disableLlm = Config.getBoolean("max.disableLlm", false);
     /**
      * enable dump fastbot memory, never use
      */

@@ -207,8 +207,11 @@ public class MonkeySourceRandom implements MonkeyEventSource {
 
 
     private UITarpitDetector tarpitDetector;
-//    private Tarpit currentTarpit;
     private boolean isLLMAction = false;
+
+    // ---- multi-step experiment state ----
+    private boolean prevInTarpit = false;
+    private int postEscapeRemaining = 0;  // Fixed-N countdown
 
     public MonkeySourceRandom(Random random, List<ComponentName> MainApps, long throttle, boolean randomizeThrottle,
                               boolean permissionTargetSystem, File outputDirectory) {
@@ -691,19 +694,44 @@ public class MonkeySourceRandom implements MonkeyEventSource {
         if (mQ.isEmpty()) {
             try{
                 File currentScreen = getCurrentScreen();
-                // detect tarpit
-                if (tarpitDetector.detectedUiTarpit(currentScreen, lastScreen)) {
-                    // if visited a known tarpit then probablity resue
-                    if ( !tarpitDetector.isNewTarpit(currentScreen) &&
+
+                // detect tarpit (skip if LLM disabled)
+                boolean currentlyInTarpit = !Config.disableLlm
+                        && tarpitDetector.detectedUiTarpit(currentScreen, lastScreen);
+
+                // escape detection: transition from in-tarpit to not-in-tarpit
+                boolean justEscaped = prevInTarpit && !currentlyInTarpit;
+                prevInTarpit = currentlyInTarpit;  // update before any early return
+
+                if (justEscaped) {
+                    postEscapeRemaining = Config.llmPostEscapeN;
+                    Logger.infoFormat("// Escaped tarpit; post-escape LLM steps remaining: %d",
+                            postEscapeRemaining);
+                }
+
+                // decide whether to use post-escape LLM
+                boolean usePostEscapeLlm = !currentlyInTarpit && postEscapeRemaining > 0;
+                if (usePostEscapeLlm) {
+                    postEscapeRemaining--;
+                }
+
+                if (currentlyInTarpit) {
+                    // if visited a known tarpit then probability reuse
+                    if (!tarpitDetector.isNewTarpit(currentScreen) &&
                             mRandom.nextDouble() < 0.5) {
-                        Logger.println("// Detected UI Tarpit, strating generate Reuse event");
+                        Logger.println("// Detected UI Tarpit, starting generate Reuse event");
                         generateReuseEvent();
-                    }else{
-                        Logger.println("// Detected UI Tarpit, strating generate LLM event");
+                    } else {
+                        Logger.println("// Detected UI Tarpit, starting generate LLM event");
                         generateLLMEvents();
                         isLLMAction = true;
                     }
-                } else {// no tarpit
+                } else if (usePostEscapeLlm) {
+                    Logger.infoFormat("// Post-escape LLM step (remaining after this: %d)",
+                            postEscapeRemaining);
+                    generateLLMEvents();
+                    isLLMAction = true;
+                } else {
                     Logger.println("// No Tarpit");
                     actionList.clear();
                     llmActionHistory.clear();
