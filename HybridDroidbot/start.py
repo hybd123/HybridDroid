@@ -47,25 +47,23 @@ def parse_args():
     parser.add_argument("-ignore_ad", action="store_true", dest="ignore_ad",
                         help="Ignore Ad views by checking resource_id.")
 
-    # ---- experiment: single-step vs multi-step LLM ----
-    parser.add_argument("-llm_n", action="store", dest="llm_post_escape_n", default=0, type=int,
-                        help="[Fixed-N mode] Number of extra LLM steps AFTER escaping a tarpit. "
-                             "0 = current single-step behaviour (LLM on tarpit only, no post-escape steps). "
-                             "Mutually exclusive with -conditional.")
-    parser.add_argument("-conditional", action="store_true", dest="conditional_continuation",
-                        help="[Conditional mode] After escaping a tarpit, keep using LLM as long as the "
-                             "post-escape page shares the same content-free view-tree structure as the tarpit "
-                             "(i.e. structurally we haven't moved yet). Mutually exclusive with -llm_n > 0.")
+    # ---- experiment: Tarpit-Region Exit vs Immediate Handoff ----
+    parser.add_argument("-condition", action="store", dest="condition", default="A",
+                        choices=["A", "B"],
+                        help="A=immediate handoff to random after escape (baseline); "
+                             "B=continue LLM until perceptual similarity to tarpit ref drops below theta_exit.")
+    parser.add_argument("-theta_exit", action="store", dest="theta_exit", default=0.85, type=float,
+                        help="[Condition B] Perceptual similarity threshold below which the state is "
+                             "considered to have left the tarpit region. Default: 0.85.")
+    parser.add_argument("-c_max", action="store", dest="c_max", default=5, type=int,
+                        help="[Condition B] Safety cap on continuation steps. Default: 5.")
     parser.add_argument("-disable_llm", action="store_true", dest="disable_llm",
-                        help="Disable LLM entirely (pure-random baseline, x-axis N=0).")
+                        help="Disable LLM entirely (pure-random baseline).")
 
     options = parser.parse_args()
 
-    if options.llm_post_escape_n > 0 and options.conditional_continuation:
-        parser.error("-llm_n and -conditional are mutually exclusive: "
-                     "use one mode at a time.")
-    if options.disable_llm and (options.llm_post_escape_n > 0 or options.conditional_continuation):
-        parser.error("-disable_llm cannot be combined with -llm_n or -conditional.")
+    if options.disable_llm and options.condition == "B":
+        parser.error("-disable_llm cannot be combined with -condition B.")
 
     return options
 
@@ -99,8 +97,9 @@ def main():
         grant_perm=opts.grant_perm,
         enable_accessibility_hard=opts.enable_accessibility_hard,
         ignore_ad=opts.ignore_ad,
-        llm_post_escape_n=opts.llm_post_escape_n,
-        conditional_continuation=opts.conditional_continuation,
+        condition=opts.condition,
+        theta_exit=opts.theta_exit,
+        c_max=opts.c_max,
         disable_llm=opts.disable_llm,
     )
     droidbot.start()

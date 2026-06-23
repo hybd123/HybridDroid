@@ -2,24 +2,22 @@ import sys
 import json
 import re
 import logging
+import os
 import random
+import time
 from abc import abstractmethod
-
+from dataclasses import dataclass, field
+from typing import Optional
 
 from .input_event import *
 from .utg import UTG
 
-# Max number of restarts
 MAX_NUM_RESTARTS = 5
-# Max number of steps outside the app
 MAX_NUM_STEPS_OUTSIDE = 5
 MAX_NUM_STEPS_OUTSIDE_KILL = 10
-# Max number of replay tries
 MAX_REPLY_TRIES = 5
-# Max number of query llm
 MAX_NUM_QUERY_LLM = 15
 
-# Some input event flags
 EVENT_FLAG_STARTED = "+started"
 EVENT_FLAG_START_APP = "+start_app"
 EVENT_FLAG_STOP_APP = "+stop_app"
@@ -27,7 +25,6 @@ EVENT_FLAG_EXPLORE = "+explore"
 EVENT_FLAG_NAVIGATE = "+navigate"
 EVENT_FLAG_TOUCH = "+touch"
 
-# Policy taxanomy
 POLICY_NAIVE_DFS = "dfs_naive"
 POLICY_GREEDY_DFS = "dfs_greedy"
 POLICY_NAIVE_BFS = "bfs_naive"
@@ -41,19 +38,27 @@ POLICY_HYBIRD = "hybird"
 POLICY_RANDOM = "random"
 
 
+@dataclass
+class TarpitContext:
+    ref_screenshot: str       # screenshot path of s_tarpit_ref (S[N-k])
+    entered_at_step: int
+    escaped_at_step: Optional[int] = None
+
+
 class InputInterruptedException(Exception):
     pass
 
 
 class InputPolicy(object):
     """
-    This class is responsible for generating events to stimulate more app behaviour
-    It should call AppEventManager.send_event method continuously
+    Generates events to stimulate app behaviour.
+    Supports Tarpit-Region Exit experiment (condition A vs B).
     """
 
     def __init__(self, device, app,
-                 llm_post_escape_n=0,
-                 conditional_continuation=False,
+                 condition="A",
+                 theta_exit=0.85,
+                 c_max=5,
                  disable_llm=False):
         self.logger = logging.getLogger(self.__class__.__name__)
         self.device = device
@@ -63,32 +68,26 @@ class InputPolicy(object):
         self.last_event = None
         self.last_state = None
         self.current_state = None
-        self.__action_history=[]
-        self.__activity_history= set()
-        self.__all_action_history=set()
+        self.__action_history = []
+        self.__activity_history = set()
+        self.__all_action_history = set()
         self.llm_event = []
         self.reuse_event = []
         # experiment parameters
-        self.llm_post_escape_n = llm_post_escape_n
-        self.conditional_continuation = conditional_continuation
+        self.condition = condition        # "A": immediate handoff; "B": extend until exit region
+        self.theta_exit = theta_exit      # similarity threshold for "left tarpit region"
+        self.c_max = c_max                # safety cap on continuation steps
         self.disable_llm = disable_llm
 
     def start(self, input_manager):
-        """
-        start producing events
-        :param input_manager: instance of InputManager
-        """
         tarpit_name = None
-        # --- multi-step experiment state ---
         _prev_in_tarpit = False
-        _post_escape_remaining = 0      # Fixed-N mode: steps remaining after escape
-        _continue_conditional = False   # Conditional mode: LLM says "intermediate", keep going
+        tarpit_ctx: Optional[TarpitContext] = None
 
         while input_manager.enabled and self.action_count < input_manager.event_count:
             try:
                 self.current_state = self.device.get_current_state(self.action_count)
-                # make sure the first event is go to HOME screen
-                # the second event is to start the app
+
                 if self.action_count == 0 and self.master is None:
                     event = KeyEvent(name="HOME")
                 elif self.action_count == 1 and self.master is None:
@@ -100,93 +99,67 @@ class InputPolicy(object):
                         else input_manager.sim_calculator.detected_ui_tarpit(input_manager)
                     )
 
-                    # ---- escape detection ----
                     just_escaped = _prev_in_tarpit and not currently_in_tarpit
-                    # update _prev_in_tarpit BEFORE any `continue` so reuse path is handled correctly
                     _prev_in_tarpit = currently_in_tarpit
 
-                    if just_escaped:
-                        if not self.conditional_continuation:
-                            _post_escape_remaining = self.llm_post_escape_n
-                        # _continue_conditional is set based on LLM's is_terminal from the
-                        # escape-triggering call; handled inside the tarpit dispatch block below
-                        if input_manager.metrics_logger:
-                            input_manager.metrics_logger.on_escape(
-                                self.action_count, self.current_state, tarpit_name)
-                            input_manager.metrics_logger.on_escape_classify(
-                                input_manager.sim_calculator)
-
-                    # ---- decide whether to use post-escape LLM ----
-                    use_post_escape_llm = False
-                    if not currently_in_tarpit:
-                        if self.conditional_continuation and _continue_conditional:
-                            use_post_escape_llm = True
-                        elif not self.conditional_continuation and _post_escape_remaining > 0:
-                            use_post_escape_llm = True
-                            _post_escape_remaining -= 1
-
-                    # ---- dispatch ----
                     if currently_in_tarpit:
+                        # Record tarpit context on first detection
+                        if tarpit_ctx is None:
+                            ws = input_manager.sim_calculator.window_start_state
+                            ref_screenshot = (
+                                ws.get_state_screen()
+                                if ws is not None
+                                else self.current_state.get_state_screen()
+                            )
+                            tarpit_ctx = TarpitContext(
+                                ref_screenshot=ref_screenshot,
+                                entered_at_step=self.action_count,
+                            )
+
                         current_state_screen = self.current_state.get_state_screen()
                         is_known_tarpit, tarpit_name = input_manager.sim_calculator.check_or_add_new_trap(
                             current_state_screen, self.action_count,
                             structure_str=self.current_state.structure_str)
-                        if is_known_tarpit:
-                            # if it is a known ui tarpit, randomly choose between llm policy and reuse
-                            if random.random() < 0.5:
-                                tarpit_actions = input_manager.sim_calculator.get_tarpit_actions_by_name(tarpit_name)
-                                if len(tarpit_actions) > 0:
-                                    self.execute_tarpit_actions(tarpit_actions, input_manager, self.llm_event, self.reuse_event)
-                                    continue
+
+                        if is_known_tarpit and random.random() < 0.5:
+                            tarpit_actions = input_manager.sim_calculator.get_tarpit_actions_by_name(tarpit_name)
+                            if len(tarpit_actions) > 0:
+                                self.execute_tarpit_actions(tarpit_actions, input_manager,
+                                                            self.llm_event, self.reuse_event)
+                                continue
+
                         if input_manager.sim_calculator.sim_count > MAX_NUM_QUERY_LLM:
-                            self.logger.info(f'query too much. go back!')
+                            self.logger.info('query too much. go back!')
                             event = KeyEvent(name="BACK")
                             self.clear_action_history()
                             input_manager.sim_calculator.sim_count = 0
-                            _continue_conditional = False
                         else:
-                            llm_policy = HybirdPolicy(self.device, self.app, input_manager.random_input,
-                                                      self.action_count, self.__activity_history,
-                                                      self.__action_history, self.current_state)
+                            llm_policy = HybirdPolicy(
+                                self.device, self.app, input_manager.random_input,
+                                self.action_count, self.__activity_history,
+                                self.__action_history, self.current_state)
                             event = llm_policy.generate_event()
                             self.llm_event.append(int(self.action_count))
-                            # In conditional mode: remember whether LLM expects this to be
-                            # an intermediate action (so we continue after escape) or terminal.
-                            if self.conditional_continuation:
-                                _continue_conditional = not llm_policy.last_is_terminal
-                                self.logger.info(
-                                    f"[conditional] LLM predicts: "
-                                    f"{'intermediate → will continue after escape' if _continue_conditional else 'complete → will return to random after escape'}"
-                                )
+
                         input_manager.sim_calculator.update_tarpit_actions(tarpit_name, event)
 
-                    elif use_post_escape_llm:
-                        # post-escape LLM step (Fixed-N or Conditional): fresh instance, shared history
-                        llm_policy = HybirdPolicy(self.device, self.app, input_manager.random_input,
-                                                  self.action_count, self.__activity_history,
-                                                  self.__action_history, self.current_state)
-                        event = llm_policy.generate_event()
-                        self.llm_event.append(int(self.action_count))
-                        if self.conditional_continuation:
-                            # update continuation flag based on this step's LLM prediction
-                            _continue_conditional = not llm_policy.last_is_terminal
-                            self.logger.info(
-                                f"[conditional post-escape] LLM predicts: "
-                                f"{'intermediate → continue' if _continue_conditional else 'complete → stop'}"
-                            )
-                        else:
-                            self.logger.info(
-                                f"[fixed-N post-escape] remaining after this: {_post_escape_remaining}")
-
                     else:
+                        if just_escaped:
+                            tarpit_ctx.escaped_at_step = self.action_count
+                            if self.condition == "B":
+                                self._extend_until_exit_region(input_manager, tarpit_ctx, tarpit_name)
+                            # Start diversity window from this point (handoff to random)
+                            if input_manager.metrics_logger:
+                                input_manager.metrics_logger.on_escape(
+                                    self.action_count, self.current_state, tarpit_name)
+                            tarpit_ctx = None
+
                         tarpit_name = None
-                        _continue_conditional = False
                         event = self.generate_event()
 
-                    # ---- metrics ----
-                    if input_manager.metrics_logger:
-                        input_manager.metrics_logger.on_event(
-                            event, self.current_state, self.action_count)
+                if input_manager.metrics_logger:
+                    input_manager.metrics_logger.on_event(
+                        event, self.current_state, self.action_count)
 
                 self.last_event = event
                 self.last_state = self.current_state
@@ -194,6 +167,7 @@ class InputPolicy(object):
                 self.current_state.save2dir(input_manager.img_output, event)
                 input_manager.add_event(event)
                 self.action_count += 1
+
             except KeyboardInterrupt:
                 break
             except InputInterruptedException as e:
@@ -208,17 +182,65 @@ class InputPolicy(object):
                 traceback.print_exc()
                 continue
 
+    def _extend_until_exit_region(self, input_manager, tarpit_ctx: TarpitContext, tarpit_name):
+        """
+        Condition B: after hasTarpit goes False, continue LLM control until the current state's
+        perceptual similarity to tarpit_ctx.ref_screenshot drops below theta_exit, or c_max steps.
+        """
+        from .similarity import UITarpitDetector
+        steps_extended = 0
+
+        while steps_extended < self.c_max:
+            current_screenshot = self.current_state.get_state_screen()
+            sim = UITarpitDetector.calculate_similarity(current_screenshot, tarpit_ctx.ref_screenshot)
+            if sim < self.theta_exit:
+                self._log_continuation_event(
+                    input_manager, tarpit_ctx, steps_extended, "exited_region")
+                return
+
+            llm_policy = HybirdPolicy(
+                self.device, self.app, input_manager.random_input,
+                self.action_count, self.__activity_history,
+                self.__action_history, self.current_state)
+            event = llm_policy.generate_event()
+            self.llm_event.append(int(self.action_count))
+
+            self.last_event = event
+            self.last_state = self.current_state
+            self.__activity_history.add(self.current_state.foreground_activity)
+            self.current_state.save2dir(input_manager.img_output, event)
+            input_manager.add_event(event)
+            self.action_count += 1
+
+            self.current_state = self.device.get_current_state(self.action_count)
+            steps_extended += 1
+
+        self._log_continuation_event(
+            input_manager, tarpit_ctx, steps_extended, "c_max_reached")
+
+    def _log_continuation_event(self, input_manager, tarpit_ctx: TarpitContext,
+                                 steps_extended: int, reason: str):
+        record = {
+            "tarpit_entered_at": tarpit_ctx.entered_at_step,
+            "tarpit_escaped_at": tarpit_ctx.escaped_at_step,
+            "continuation_steps": steps_extended,
+            "stop_reason": reason,
+            "ref_screenshot": tarpit_ctx.ref_screenshot,
+        }
+        log_path = os.path.join(self.device.output_dir, "continuation_log.jsonl")
+        with open(log_path, "a") as f:
+            f.write(json.dumps(record) + "\n")
+        self.logger.info(
+            f"[condition-B] continuation done: steps={steps_extended}, reason={reason}")
+
     def get_last_state(self):
-        return self.last_state  
-    
+        return self.last_state
+
     def get_current_state(self):
         return self.current_state
-    
+
     def clear_action_history(self):
         self.__action_history = []
-    
-    # def __update_utg(self):
-    #     self.utg.add_transition(self.last_event, self.last_state, self.current_state) 
 
     def execute_tarpit_actions(self, actions, input_manager, llm_event, reuse_event):
         self.logger.info('executing reuse actions...')
@@ -226,30 +248,29 @@ class InputPolicy(object):
             self.current_state = self.device.get_current_state(self.action_count)
             self.last_state = self.current_state
             self.last_event = event
-            self.reuse_event.append(int(self.action_count)) 
+            self.reuse_event.append(int(self.action_count))
             self.current_state.save2dir(input_manager.img_output, event)
             input_manager.add_event(event)
             self.action_count += 1
             if not input_manager.sim_calculator.detected_ui_tarpit(input_manager):
-                # if escape current tarpit, skip
                 break
         self.logger.info('ending reuse actions...')
 
     @abstractmethod
     def generate_event(self):
-        """
-        generate an event
-        @return:
-        """
         pass
 
 
 class HybirdPolicy(InputPolicy):
-    def __init__(self, device, app, random_input, action_count, activity_history, action_history, current_state):
+    def __init__(self, device, app, random_input, action_count,
+                 activity_history, action_history, current_state):
         super(HybirdPolicy, self).__init__(device, app)
         self.logger = logging.getLogger(self.__class__.__name__)
-        self.last_is_terminal = True  # LLM's prediction: was the chosen action a terminal transition?
-        self.task = "You are an expert in App GUI testing. Please guide the testing tool to enhance the coverage of functional scenarios in testing the App based on your extensive App testing experience. "
+        self.task = (
+            "You are an expert in App GUI testing. Please guide the testing tool to enhance "
+            "the coverage of functional scenarios in testing the App based on your extensive "
+            "App testing experience. "
+        )
         self.random_input = random_input
         self.__nav_target = None
         self.__nav_num_steps = -1
@@ -258,80 +279,48 @@ class HybirdPolicy(InputPolicy):
         self.__event_trace = ""
         self.__missed_states = set()
         self.__random_explore = random_input
-        self.__action_history=action_history
-        self.__all_action_history=set()
+        self.__action_history = action_history
+        self.__all_action_history = set()
         self.__activity_history = activity_history
         self.action_count = action_count
         self.current_state = current_state
 
     def generate_event(self):
-        """
-        generate an event
-        @return:
-        """
-
-        # Get current device state
-        # self.current_state = self.device.get_current_state(self.action_count)
         if self.current_state is None:
-            import time
             time.sleep(5)
             return KeyEvent(name="BACK")
-
         event = self.generate_event_based_on_utg()
-
         self.last_state = self.current_state
         self.last_event = event
         return event
 
     def generate_event_based_on_utg(self):
-        """
-        generate an event based on current UTG
-        @return: InputEvent
-        """
         current_state = self.current_state
         self.logger.info("Current state: %s" % current_state.state_str)
         if current_state.state_str in self.__missed_states:
             self.__missed_states.remove(current_state.state_str)
 
         if current_state.get_app_activity_depth(self.app) < 0:
-            # If the app is not in the activity stack
             start_app_intent = self.app.get_start_intent()
-
-            # It seems the app stucks at some state, has been
-            # 1) force stopped (START, STOP)
-            #    just start the app again by increasing self.__num_restarts
-            # 2) started at least once and cannot be started (START)
-            #    pass to let viewclient deal with this case
-            # 3) nothing
-            #    a normal start. clear self.__num_restarts.
-
             if self.__event_trace.endswith(EVENT_FLAG_START_APP + EVENT_FLAG_STOP_APP) \
                     or self.__event_trace.endswith(EVENT_FLAG_START_APP):
                 self.__num_restarts += 1
                 self.logger.info("The app had been restarted %d times.", self.__num_restarts)
             else:
                 self.__num_restarts = 0
-
-            # pass (START) through
             if not self.__event_trace.endswith(EVENT_FLAG_START_APP):
                 if self.__num_restarts > MAX_NUM_RESTARTS:
-                    # If the app had been restarted too many times, enter random mode
-                    msg = "The app had been restarted too many times. Entering random mode."
-                    self.logger.info(msg)
+                    self.logger.info("Too many restarts. Entering random mode.")
                     self.__random_explore = True
                 else:
-                    # Start the app
                     self.__event_trace += EVENT_FLAG_START_APP
                     self.logger.info("Trying to start the app...")
                     self.__action_history = [f'- start the app {self.app.app_name}']
                     return IntentEvent(intent=start_app_intent)
 
         elif current_state.get_app_activity_depth(self.app) > 0:
-            # If the app is in activity stack but is not in foreground
             self.__num_steps_outside += 1
-
             if self.__num_steps_outside > MAX_NUM_STEPS_OUTSIDE:
-                # If the app has not been in foreground for too long, try to go back
                 if self.__num_steps_outside > MAX_NUM_STEPS_OUTSIDE_KILL:
                     stop_app_intent = self.app.get_stop_intent()
                     go_back_event = IntentEvent(stop_app_intent)
@@ -342,12 +331,11 @@ class HybirdPolicy(InputPolicy):
                 self.__action_history.append('- go back')
                 return go_back_event
         else:
-            # If the app is in foreground
             self.__num_steps_outside = 0
 
-        action, candidate_actions, action_id, is_terminal = self._get_action_with_LLM(
+        action, candidate_actions, action_id = self._get_action_with_LLM(
             current_state, self.__action_history, self.__activity_history, self.__all_action_history)
-        self.last_is_terminal = is_terminal
+
         if action is not None:
             action_str = f"{current_state.get_action_desc(action)} ({action_id})"
             self.__action_history.append(action_str)
@@ -361,32 +349,23 @@ class HybirdPolicy(InputPolicy):
             self.__all_action_history.add(current_state.get_action_desc(action))
             return action
 
-        # If couldn't find a exploration target, stop the app
         stop_app_intent = self.app.get_stop_intent()
         self.logger.info("Cannot find an exploration target. Trying to restart app...")
         self.__action_history.append('- stop the app')
         self.__all_action_history.add('- stop the app')
         self.__event_trace += EVENT_FLAG_STOP_APP
         return IntentEvent(intent=stop_app_intent)
-        
+
     def _query_llm(self, prompt, model_name='gpt-3.5-turbo'):
         # TODO: replace with your own LLM
         from openai import OpenAI
         gpt_url = ''
         gpt_key = ''
-        client = OpenAI(
-            base_url=gpt_url,
-            api_key=gpt_key
-        )
-
-        messages=[{"role": "user", "content": prompt}]
+        client = OpenAI(base_url=gpt_url, api_key=gpt_key)
+        messages = [{"role": "user", "content": prompt}]
         completion = client.chat.completions.create(
-            messages=messages,
-            model=model_name,
-            timeout=30
-        )
-        res = completion.choices[0].message.content
-        return res
+            messages=messages, model=model_name, timeout=30)
+        return completion.choices[0].message.content
 
     def _get_action_with_LLM(self, current_state, action_history, activity_history, all_action_history):
         activity = current_state.foreground_activity
@@ -403,13 +382,7 @@ class HybirdPolicy(InputPolicy):
         state_prompt, candidate_actions = current_state.get_described_actions()
         question = (
             'Which action should I choose next?\n'
-            'Line 1: the action id (integer). If no more action is needed, return -1.\n'
-            'Line 2: "complete" if executing this action is expected to achieve a genuine '
-            'functional transition (navigates to a meaningfully new screen or completes an '
-            'operation, e.g. Subscribe, Confirm, Submit, Save); '
-            'or "intermediate" if it only opens an intermediate state that still needs further '
-            'actions to reach the target (e.g. opens a menu, dialog, filter panel, or '
-            'navigation drawer). Return exactly one of: complete / intermediate.'
+            'Return the action id (integer). If no more action is needed, return -1.'
         )
         prompt = f'{task_prompt}\n{state_prompt}\n{history_prompt}\n{question}'
         print(prompt)
@@ -419,47 +392,46 @@ class HybirdPolicy(InputPolicy):
         lines = response.strip().split('\n')
         match = re.search(r'-?\d+', lines[0])
         if not match:
-            return None, candidate_actions, None, True
+            return None, candidate_actions, None
 
         idx = int(match.group(0))
         if idx < 0 or idx >= len(candidate_actions):
-            return None, candidate_actions, None, True
-
-        # parse is_terminal from second line (default True = treat as complete)
-        is_terminal = True
-        if len(lines) > 1 and 'intermediate' in lines[1].lower():
-            is_terminal = False
+            return None, candidate_actions, None
 
         selected_action = candidate_actions[idx]
         if isinstance(selected_action, SetTextEvent):
             view_text = current_state.get_view_desc(selected_action.view)
-            text_question = f'What text should I enter to the {view_text}? Just return the text and nothing else.'
+            text_question = (
+                f'What text should I enter to the {view_text}? '
+                f'Just return the text and nothing else.')
             text_prompt = f'{task_prompt}\n{state_prompt}\n{text_question}'
             print(text_prompt)
             text_response = self._query_llm(text_prompt)
             print(f'response: {text_response}')
             selected_action.text = text_response.replace('"', '')
-            if len(selected_action.text) > 30:  # heuristically disable long text input
+            if len(selected_action.text) > 30:
                 selected_action.text = ''
 
-        return selected_action, candidate_actions, idx, is_terminal
+        return selected_action, candidate_actions, idx
 
-    
+
 class UtgRandomPolicy(InputPolicy):
     """
-    random input policy based on UTG
+    Random input policy based on UTG, with tarpit detection and LLM escape.
     """
 
     def __init__(self, device, app, random_input=True,
                  number_of_events_that_restart_app=100,
                  clear_and_restart_app_data_after_100_events=False,
-                 llm_post_escape_n=0,
-                 conditional_continuation=False,
+                 condition="A",
+                 theta_exit=0.85,
+                 c_max=5,
                  disable_llm=False):
         super(UtgRandomPolicy, self).__init__(
             device, app,
-            llm_post_escape_n=llm_post_escape_n,
-            conditional_continuation=conditional_continuation,
+            condition=condition,
+            theta_exit=theta_exit,
+            c_max=c_max,
             disable_llm=disable_llm,
         )
         self.number_of_events_that_restart_app = number_of_events_that_restart_app
@@ -467,59 +439,30 @@ class UtgRandomPolicy(InputPolicy):
         self.logger = logging.getLogger(self.__class__.__name__)
         self.random_input = random_input
         self.preferred_buttons = [
-            "yes",
-            "ok",
-            "activate",
-            "detail",
-            "more",
-            "access",
-            "allow",
-            "check",
-            "agree",
-            "try",
-            "go",
-            "next",
+            "yes", "ok", "activate", "detail", "more", "access",
+            "allow", "check", "agree", "try", "go", "next",
         ]
         self.__num_restarts = 0
         self.__num_steps_outside = 0
         self.__event_trace = ""
         self.__missed_states = set()
-        self.number_of_steps_outside_the_shortest_path = 0
-        self.reached_state_on_the_shortest_path = []
         self.last_rotate_events = KEY_RotateDeviceNeutralEvent
 
-    def get_action_history(self):
-        return self.__action_history
-
-    def get_all_action_history(self):
-        return self.__all_action_history
-
-    def get_activity_history(self):
-        return self.__activity_history
-
     def generate_event(self):
-        """
-        generate an event
-        @return:
-        """
-        
-        # Get current device state
-        # self.current_state = self.device.get_current_state(self.action_count)
         if self.current_state is None:
-            import time
             time.sleep(5)
             return KeyEvent(name="BACK")
 
-        # self.__update_utg()
         event = None
-
-        if self.action_count % self.number_of_events_that_restart_app == 0 and self.clear_and_restart_app_data_after_100_events:
-            self.logger.info("clear and restart app after %s events" % self.number_of_events_that_restart_app)
+        if self.action_count % self.number_of_events_that_restart_app == 0 \
+                and self.clear_and_restart_app_data_after_100_events:
+            self.logger.info("clear and restart app after %s events"
+                             % self.number_of_events_that_restart_app)
             return ReInstallAppEvent(self.app)
 
         if event is None:
             event = self.generate_event_based_on_utg()
-        
+
         if isinstance(event, RotateDevice):
             if self.last_rotate_events == KEY_RotateDeviceNeutralEvent:
                 self.last_rotate_events = KEY_RotateDeviceRightEvent
@@ -531,57 +474,33 @@ class UtgRandomPolicy(InputPolicy):
         self.last_state = self.current_state
         self.last_event = event
         return event
-    
+
     def generate_event_based_on_utg(self):
-        """
-        generate an event based on current UTG
-        @return: InputEvent
-        """
         current_state = self.current_state
         self.logger.info("Current state: %s" % current_state.state_str)
         if current_state.state_str in self.__missed_states:
             self.__missed_states.remove(current_state.state_str)
 
         if current_state.get_app_activity_depth(self.app) < 0:
-            # If the app is not in the activity stack
             start_app_intent = self.app.get_start_intent()
-
-            # It seems the app stucks at some state, has been
-            # 1) force stopped (START, STOP)
-            #    just start the app again by increasing self.__num_restarts
-            # 2) started at least once and cannot be started (START)
-            #    pass to let viewclient deal with this case
-            # 3) nothing
-            #    a normal start. clear self.__num_restarts.
-
             if self.__event_trace.endswith(
                 EVENT_FLAG_START_APP + EVENT_FLAG_STOP_APP
             ) or self.__event_trace.endswith(EVENT_FLAG_START_APP):
                 self.__num_restarts += 1
-                self.logger.info(
-                    "The app had been restarted %d times.", self.__num_restarts
-                )
+                self.logger.info("The app had been restarted %d times.", self.__num_restarts)
             else:
                 self.__num_restarts = 0
-
-            # pass (START) through
             if not self.__event_trace.endswith(EVENT_FLAG_START_APP):
                 if self.__num_restarts > MAX_NUM_RESTARTS:
-                    # If the app had been restarted too many times, enter random mode
-                    msg = "The app had been restarted too many times. Entering random mode."
-                    self.logger.info(msg)
+                    self.logger.info("Too many restarts. Entering random mode.")
                 else:
-                    # Start the app
                     self.__event_trace += EVENT_FLAG_START_APP
                     self.logger.info("Trying to start the app...")
                     return IntentEvent(intent=start_app_intent)
 
         elif current_state.get_app_activity_depth(self.app) > 0:
-            # If the app is in activity stack but is not in foreground
             self.__num_steps_outside += 1
-
             if self.__num_steps_outside > MAX_NUM_STEPS_OUTSIDE:
-                # If the app has not been in foreground for too long, try to go back
                 if self.__num_steps_outside > MAX_NUM_STEPS_OUTSIDE_KILL:
                     stop_app_intent = self.app.get_stop_intent()
                     go_back_event = IntentEvent(stop_app_intent)
@@ -591,11 +510,9 @@ class UtgRandomPolicy(InputPolicy):
                 self.logger.info("Going back to the app...")
                 return go_back_event
         else:
-            # If the app is in foreground
             self.__num_steps_outside = 0
 
         possible_events = current_state.get_possible_input()
-
         if self.random_input:
             random.shuffle(possible_events)
         possible_events.append(KeyEvent(name="BACK"))
@@ -604,5 +521,3 @@ class UtgRandomPolicy(InputPolicy):
         self.__event_trace += EVENT_FLAG_EXPLORE
         event = random.choice(possible_events)
         return event
-
-

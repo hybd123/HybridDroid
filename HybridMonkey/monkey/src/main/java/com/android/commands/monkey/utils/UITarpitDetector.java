@@ -33,6 +33,7 @@ public class UITarpitDetector {
     private MonkeyEventQueue mQ;
     private static int consecutiveFails = 0;
     private Tarpit targetTarpit;
+    private File windowStartScreen = null;  // s_tarpit_ref: first screen in the tarpit window
 
     public UITarpitDetector(int simK, MonkeyEventQueue mQ) {
         this.simK = simK;
@@ -64,13 +65,22 @@ public class UITarpitDetector {
         return false;
     }
 
-    public boolean detectedUiTarpit(File cureentScreen, File lastScreen) {
-        if (!isSimilarPage(cureentScreen, lastScreen)) {
+    public boolean detectedUiTarpit(File currentScreen, File lastScreen) {
+        if (!isSimilarPage(currentScreen, lastScreen)) {
             simCount = 0;
+            windowStartScreen = null;
         } else {
+            if (simCount == 0) {
+                // first similar step: tarpit window starts at lastScreen (S[N-k])
+                windowStartScreen = lastScreen;
+            }
             simCount++;
         }
         return simCount >= simK;
+    }
+
+    public File getWindowStartScreen() {
+        return windowStartScreen;
     }
 
 

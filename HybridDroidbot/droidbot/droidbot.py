@@ -48,8 +48,9 @@ class DroidBot(object):
                  humanoid=None,
                  ignore_ad=False,
                  replay_output=None,
-                 llm_post_escape_n=0,
-                 conditional_continuation=False,
+                 condition="A",
+                 theta_exit=0.85,
+                 c_max=5,
                  disable_llm=False):
         """
         initiate droidbot with configurations
@@ -118,8 +119,9 @@ class DroidBot(object):
                 profiling_method=profiling_method,
                 master=master,
                 replay_output=replay_output,
-                llm_post_escape_n=llm_post_escape_n,
-                conditional_continuation=conditional_continuation,
+                condition=condition,
+                theta_exit=theta_exit,
+                c_max=c_max,
                 disable_llm=disable_llm,
             )
         except Exception:

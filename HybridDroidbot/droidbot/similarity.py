@@ -16,6 +16,7 @@ class UITarpitDetector(object):
         self.sim_k = sim_k
         self.sim_count = 0
         self.device = device
+        self.window_start_state = None  # s_tarpit_ref: first state in the tarpit window
         self.logger = logging.getLogger('UITarpitDetector')
         self.tarpit_save_dir = os.path.join(self.device.output_dir, "ui_tarpits")
         if not os.path.exists(self.tarpit_save_dir):
@@ -41,18 +42,22 @@ class UITarpitDetector(object):
             return False
         return True  
 
-    def detected_ui_tarpit(self,input_manager):
+    def detected_ui_tarpit(self, input_manager):
         """
         detect ui tarpit
-        """    
+        """
         if not self.is_similar_page(input_manager):
             self.sim_count = 0
+            self.window_start_state = None
             input_manager.policy.clear_action_history()
         else:
-            self.sim_count += 1   
-        if self.sim_count >= self.sim_k :
+            if self.sim_count == 0:
+                # first similar step: tarpit window starts at last_state (S[N-k])
+                self.window_start_state = input_manager.policy.get_last_state()
+            self.sim_count += 1
+        if self.sim_count >= self.sim_k:
             return True
-        return False  
+        return False
     
     # def load_ui_tarpits(self):
     #     """加载保存的UI陷阱"""

@@ -209,9 +209,13 @@ public class MonkeySourceRandom implements MonkeyEventSource {
     private UITarpitDetector tarpitDetector;
     private boolean isLLMAction = false;
 
-    // ---- multi-step experiment state ----
+    // ---- Tarpit-Region Exit experiment state ----
     private boolean prevInTarpit = false;
-    private int postEscapeRemaining = 0;  // Fixed-N countdown
+    private File tarpitRefScreen = null;      // s_tarpit_ref: first screen in tarpit window
+    private int tarpitEnteredAtStep = -1;
+    private int tarpitEscapedAtStep = -1;
+    private boolean continuationMode = false;  // Condition B: still guiding after escape
+    private int continuationSteps = 0;
 
     public MonkeySourceRandom(Random random, List<ComponentName> MainApps, long throttle, boolean randomizeThrottle,
                               boolean permissionTargetSystem, File outputDirectory) {
@@ -701,22 +705,27 @@ public class MonkeySourceRandom implements MonkeyEventSource {
 
                 // escape detection: transition from in-tarpit to not-in-tarpit
                 boolean justEscaped = prevInTarpit && !currentlyInTarpit;
-                prevInTarpit = currentlyInTarpit;  // update before any early return
+                prevInTarpit = currentlyInTarpit;
 
-                if (justEscaped) {
-                    postEscapeRemaining = Config.llmPostEscapeN;
-                    Logger.infoFormat("// Escaped tarpit; post-escape LLM steps remaining: %d",
-                            postEscapeRemaining);
-                }
-
-                // decide whether to use post-escape LLM
-                boolean usePostEscapeLlm = !currentlyInTarpit && postEscapeRemaining > 0;
-                if (usePostEscapeLlm) {
-                    postEscapeRemaining--;
+                // Condition B: enter continuation mode on escape
+                if (justEscaped && "B".equals(Config.condition)) {
+                    tarpitEscapedAtStep = mEventCount;
+                    continuationMode = true;
+                    continuationSteps = 0;
+                    Logger.println("// Escaped tarpit [Condition B]: entering continuation mode");
                 }
 
                 if (currentlyInTarpit) {
-                    // if visited a known tarpit then probability reuse
+                    // record ref state on first tarpit detection
+                    if (tarpitRefScreen == null) {
+                        tarpitRefScreen = tarpitDetector.getWindowStartScreen();
+                        if (tarpitRefScreen == null) tarpitRefScreen = lastScreen;
+                        tarpitEnteredAtStep = mEventCount;
+                    }
+                    // re-entering tarpit cancels any ongoing continuation
+                    continuationMode = false;
+                    continuationSteps = 0;
+
                     if (!tarpitDetector.isNewTarpit(currentScreen) &&
                             mRandom.nextDouble() < 0.5) {
                         Logger.println("// Detected UI Tarpit, starting generate Reuse event");
@@ -726,13 +735,41 @@ public class MonkeySourceRandom implements MonkeyEventSource {
                         generateLLMEvents();
                         isLLMAction = true;
                     }
-                } else if (usePostEscapeLlm) {
-                    Logger.infoFormat("// Post-escape LLM step (remaining after this: %d)",
-                            postEscapeRemaining);
-                    generateLLMEvents();
-                    isLLMAction = true;
+
+                } else if (continuationMode) {
+                    // Condition B: check if we've visually left the tarpit region
+                    if (continuationSteps >= Config.cMax) {
+                        logContinuationEvent(continuationSteps, "c_max_reached");
+                        continuationMode = false;
+                        tarpitRefScreen = null;
+                        actionList.clear();
+                        llmActionHistory.clear();
+                        generateEvents();
+                        isLLMAction = false;
+                    } else {
+                        double sim = (tarpitRefScreen != null && tarpitRefScreen.exists())
+                                ? UITarpitDetector.calculateSimilarity(currentScreen, tarpitRefScreen)
+                                : 0.0;
+                        Logger.infoFormat("// [Condition B] sim to tarpit ref: %.3f (threshold: %.3f), step %d/%d",
+                                sim, Config.thetaExit, continuationSteps, Config.cMax);
+                        if (sim < Config.thetaExit) {
+                            logContinuationEvent(continuationSteps, "exited_region");
+                            continuationMode = false;
+                            tarpitRefScreen = null;
+                            actionList.clear();
+                            llmActionHistory.clear();
+                            generateEvents();
+                            isLLMAction = false;
+                        } else {
+                            generateLLMEvents();
+                            isLLMAction = true;
+                            continuationSteps++;
+                        }
+                    }
+
                 } else {
                     Logger.println("// No Tarpit");
+                    tarpitRefScreen = null;
                     actionList.clear();
                     llmActionHistory.clear();
                     try {
@@ -904,6 +941,24 @@ public class MonkeySourceRandom implements MonkeyEventSource {
         this.intentAction = intentAction;
         this.intentData = intentData;
         this.quickActivity = quickActivity;
+    }
+
+    private void logContinuationEvent(int steps, String reason) {
+        try {
+            String record = "{\"tarpit_entered_at\":" + tarpitEnteredAtStep
+                    + ",\"tarpit_escaped_at\":" + tarpitEscapedAtStep
+                    + ",\"continuation_steps\":" + steps
+                    + ",\"stop_reason\":\"" + reason + "\""
+                    + ",\"ref_screen\":\"" + (tarpitRefScreen != null ? tarpitRefScreen.getPath() : "") + "\""
+                    + "}\n";
+            File logFile = new File("/sdcard/fastbot/continuation_log.jsonl");
+            java.io.FileWriter fw = new java.io.FileWriter(logFile, true);
+            fw.write(record);
+            fw.close();
+            Logger.infoFormat("// [Condition B] logged continuation: steps=%d reason=%s", steps, reason);
+        } catch (Exception e) {
+            Logger.errorPrintln("Failed to write continuation log: " + e.getMessage());
+        }
     }
 
     public void tearDown() {

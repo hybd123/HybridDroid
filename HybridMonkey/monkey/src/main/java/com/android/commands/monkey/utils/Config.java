@@ -127,9 +127,14 @@ public class Config {
      */
     public static final boolean clearPackage = Config.getBoolean("max.clearPackage", false);
 
-    // ---- Single-step vs Multi-step LLM ablation experiment ----
-    /** Extra LLM steps after escaping a tarpit. 0 = current single-step behaviour. */
-    public static final int llmPostEscapeN = Config.getInteger("max.llmPostEscapeN", 0);
+    // ---- Tarpit-Region Exit vs Immediate Handoff experiment ----
+    /** "A" = immediate handoff to random after escape (baseline).
+     *  "B" = continue LLM until perceptual similarity to tarpit ref drops below thetaExit. */
+    public static final String condition = Config.get("max.condition", "A");
+    /** Perceptual similarity threshold for leaving the tarpit region (Condition B). */
+    public static final double thetaExit = Config.getDouble("max.thetaExit", 0.85);
+    /** Safety cap on continuation steps (Condition B). */
+    public static final int cMax = Config.getInteger("max.cMax", 5);
     /** Disable LLM entirely (pure-random baseline). */
     public static final boolean disableLlm = Config.getBoolean("max.disableLlm", false);
     /**

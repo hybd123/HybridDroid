@@ -27,8 +27,9 @@ class InputManager(object):
                  event_count, event_interval,
                  script_path=None, profiling_method=None, master=None,
                  replay_output=None,
-                 llm_post_escape_n=0,
-                 conditional_continuation=False,
+                 condition="A",
+                 theta_exit=0.85,
+                 c_max=5,
                  disable_llm=False):
         """
         manage input event sent to the target device
@@ -57,8 +58,9 @@ class InputManager(object):
         self.monkey = None
 
         # experiment parameters
-        self.llm_post_escape_n = llm_post_escape_n
-        self.conditional_continuation = conditional_continuation
+        self.condition = condition
+        self.theta_exit = theta_exit
+        self.c_max = c_max
         self.disable_llm = disable_llm
 
         # metrics logger (created after policy so output_dir is known)
@@ -87,8 +89,9 @@ class InputManager(object):
         elif self.policy_name == POLICY_RANDOM:
             input_policy = UtgRandomPolicy(
                 device, app, self.random_input,
-                llm_post_escape_n=self.llm_post_escape_n,
-                conditional_continuation=self.conditional_continuation,
+                condition=self.condition,
+                theta_exit=self.theta_exit,
+                c_max=self.c_max,
                 disable_llm=self.disable_llm,
             )
         else:
@@ -98,8 +101,9 @@ class InputManager(object):
 
     def _init_metrics_logger(self):
         config = {
-            "llm_post_escape_n": self.llm_post_escape_n,
-            "conditional_continuation": self.conditional_continuation,
+            "condition": self.condition,
+            "theta_exit": self.theta_exit,
+            "c_max": self.c_max,
             "disable_llm": self.disable_llm,
             "app": self.app.app_name if self.app else None,
         }
